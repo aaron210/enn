@@ -1,4 +1,4 @@
-package nntpserver
+package nnn
 
 import (
 	"math"
