@@ -1,4 +1,4 @@
-package main
+package common
 
 import (
 	"math/rand"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestAA(t *testing.T) {
-	s := &HighLowSlice{maxSize: 2}
+	s := &HighLowSlice{MaxSize: 2}
 	rand.Seed(time.Now().Unix())
 	for i := 0; i < 10; i++ {
 		s.Append(i)

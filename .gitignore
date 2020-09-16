@@ -5,3 +5,5 @@
 /examples/couchserver/groupcreator/groupcreator
 /examples/server/server
 .DS_Store
+testdb
+testdb.data

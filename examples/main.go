@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,141 +11,90 @@ import (
 	"math/rand"
 	"net"
 	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coyove/nnn"
+	"github.com/coyove/nnn/examples/common"
 )
 
 var ServerName = flag.String("name", "10.94.86.99", "")
 var MaxPostSize = flag.Int64("max-post-size", 1024*1024*3, "")
 
-type HighLowSlice struct {
-	mu        sync.RWMutex
-	d         []interface{}
-	MaxSize   int
-	high, low int
-}
-
-func (s *HighLowSlice) Len() int { return s.high }
-
-func (s *HighLowSlice) High() int { return s.high }
-
-func (s *HighLowSlice) Low() int { return s.low }
-
-func (s *HighLowSlice) String() string {
-	return fmt.Sprintf("[%v~%v max:%v data:%v", s.low, s.high, s.MaxSize, s.d)
-}
-
-func (s *HighLowSlice) Get(i int) (interface{}, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if i < s.low || i >= s.high {
-		return nil, false
-	}
-	i -= s.low
-	return s.d[i], true
-}
-
-func (s *HighLowSlice) Set(i int, v interface{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if i < s.low {
-		return
-	}
-	i -= s.low
-	s.d[i] = v
-}
-
-func (s *HighLowSlice) Slice(i, j int, copy bool) []interface{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if j <= s.low || j > s.high {
-		return nil
-	}
-	j -= s.low
-	if i < s.low {
-		i = s.low
-	}
-	if copy {
-		return append([]interface{}{}, s.d[i:j]...)
-	}
-	return s.d[i:j]
-}
-
-func (s *HighLowSlice) Append(v interface{}) ([]interface{}, int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.d = append(s.d, v)
-	s.high++
-
-	var purged []interface{}
-	if len(s.d) > s.MaxSize {
-		p := 1 / float64(len(s.d)-s.MaxSize+1)
-		if rand.Float64() > p {
-			x := len(s.d) - s.MaxSize
-			purged = append([]interface{}{}, s.d[:x]...)
-
-			s.low += x
-			copy(s.d, s.d[x:])
-			s.d = s.d[:s.MaxSize]
-		}
-	}
-	return purged, s.high
-}
-
 const maxArticles = 100
 
 type articleRef struct {
-	msgid string
-	num   int
+	msgid  string
+	offset int64
+	length int64
 }
 
 type groupStorage struct {
-	group *nnn.Group
-	// article refs
-	articles *HighLowSlice
+	group    *nnn.Group
+	articles *common.HighLowSlice
 }
 
 type articleStorage struct {
-	headers  textproto.MIMEHeader
-	body     string
-	refcount int
+	Headers textproto.MIMEHeader
+	Body    string
+	Refer   []string
 }
 
 type testBackendType struct {
-	// group name -> group storage
-	groups map[string]*groupStorage
-	// message ID -> article
-	articles map[string]*articleStorage
+	groups      map[string]*groupStorage
+	articles    map[string]*articleRef
+	index, data *os.File
+	mu          sync.Mutex
 }
 
-var testBackend = testBackendType{
-	groups:   map[string]*groupStorage{},
-	articles: map[string]*articleStorage{},
+func (tb *testBackendType) writeData(buf []byte) (*articleRef, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	f := tb.data
+
+	if _, err := f.Seek(0, 2); err != nil {
+		return nil, err
+	}
+
+	offset, err := f.Seek(0, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	n, err := f.Write(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	if n != len(buf) {
+		return nil, io.ErrShortWrite
+	}
+
+	return &articleRef{
+		offset: offset,
+		length: int64(n),
+	}, nil
 }
 
-func init() {
+func (tb *testBackendType) writeIndex(buf []byte) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	f := tb.index
 
-	testBackend.groups["alt.test"] = &groupStorage{
-		group: &nnn.Group{
-			Name:        "alt.test",
-			Description: "A test.",
-			Posting:     nnn.PostingNotPermitted},
-		articles: &HighLowSlice{MaxSize: maxArticles},
+	if _, err := f.Seek(0, 2); err != nil {
+		return err
 	}
-
-	testBackend.groups["misc.test"] = &groupStorage{
-		group: &nnn.Group{
-			Name:        "misc.test",
-			Description: "More testing.",
-			Posting:     nnn.PostingPermitted},
-		articles: &HighLowSlice{MaxSize: maxArticles},
+	n, err := f.Write(buf)
+	if err != nil {
+		return err
 	}
-
+	if n != len(buf) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (tb *testBackendType) ListGroups(max int) ([]*nnn.Group, error) {
@@ -163,9 +113,29 @@ func (tb *testBackendType) GetGroup(name string) (*nnn.Group, error) {
 	return group.group, nil
 }
 
-func mkArticle(a *articleStorage) *nnn.Article {
-	hdr := make(textproto.MIMEHeader, len(a.headers))
-	for k, v := range a.headers {
+func (tb *testBackendType) mkArticle(a *articleRef) (*nnn.Article, error) {
+	f, err := os.OpenFile(tb.data.Name(), os.O_RDONLY, 0777)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(a.offset, 0); err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, a.length)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return nil, err
+	}
+
+	as := articleStorage{}
+	if err := json.Unmarshal(buf, &as); err != nil {
+		return nil, err
+	}
+
+	hdr := make(textproto.MIMEHeader, len(as.Headers))
+	for k, v := range as.Headers {
 		if k == "X-Message-Id" {
 			hdr["Message-Id"] = []string{"<" + v[0] + "@" + *ServerName + ">", v[0]}
 		} else {
@@ -174,10 +144,10 @@ func mkArticle(a *articleStorage) *nnn.Article {
 	}
 	return &nnn.Article{
 		Header: hdr,
-		Body:   strings.NewReader(a.body),
-		Bytes:  len(a.body),
-		Lines:  strings.Count(a.body, "\n"),
-	}
+		Body:   strings.NewReader(as.Body),
+		Bytes:  len(as.Body),
+		Lines:  strings.Count(as.Body, "\n"),
+	}, nil
 }
 
 func (tb *testBackendType) GetArticle(group *nnn.Group, id string) (*nnn.Article, error) {
@@ -203,7 +173,7 @@ func (tb *testBackendType) GetArticle(group *nnn.Group, id string) (*nnn.Article
 	if a == nil {
 		return nil, nnn.ErrInvalidMessageID
 	}
-	return mkArticle(a), nil
+	return tb.mkArticle(a)
 }
 
 func (tb *testBackendType) GetArticles(group *nnn.Group, from, to int64) ([]nnn.NumberedArticle, error) {
@@ -213,7 +183,7 @@ func (tb *testBackendType) GetArticles(group *nnn.Group, from, to int64) ([]nnn.
 	}
 
 	var rv []nnn.NumberedArticle
-	for _, v := range gs.articles.Slice(int(from-1), int(to-1)+1, false) {
+	for i, v := range gs.articles.Slice(int(from-1), int(to-1)+1, false) {
 		aref, ok := v.(*articleRef)
 		if !ok {
 			continue
@@ -222,9 +192,14 @@ func (tb *testBackendType) GetArticles(group *nnn.Group, from, to int64) ([]nnn.
 		if !ok {
 			continue
 		}
+		aa, err := tb.mkArticle(a)
+		if err != nil {
+			log.Println("GetArticles, msgid:", aref.msgid, err)
+			continue
+		}
 		rv = append(rv, nnn.NumberedArticle{
-			Num:     int64(aref.num),
-			Article: mkArticle(a),
+			Num:     int64(i) + (from - 1) + 1,
+			Article: aa,
 		})
 	}
 
@@ -260,32 +235,50 @@ func (tb *testBackendType) Post(article *nnn.Article) error {
 	article.Header["X-Message-Id"] = []string{msgID}
 
 	a := articleStorage{
-		headers:  article.Header,
-		body:     buf.String(),
-		refcount: 0,
+		Headers: article.Header,
+		Body:    buf.String(),
+		Refer:   article.Header["Newsgroups"],
 	}
 
 	if _, ok := tb.articles[msgID]; ok {
 		return nnn.ErrPostingFailed
 	}
 
-	for _, g := range article.Header["Newsgroups"] {
+	jsonbuf, _ := json.Marshal(a)
+	ar, err := tb.writeData(jsonbuf)
+	if err != nil {
+		return err
+	}
+	ar.msgid = msgID
+
+	tmp := bytes.Buffer{}
+	for _, g := range a.Refer {
 		if g, ok := tb.groups[g]; ok {
-			a.refcount++
-
-			ar := &articleRef{msgid: msgID}
-			_, ar.num = g.articles.Append(ar)
-
-			g.group.Low = int64(g.articles.Low() + 1)
-			g.group.High = int64(g.articles.High()+1) - 1
-			g.group.Count = int64(g.articles.Len())
-
-			log.Printf("%q new post: %v", g.group.Name, msgID)
+			tmp.WriteString(fmt.Sprintf("\nA%s %s %s %s", g.group.Name, msgID,
+				strconv.FormatInt(ar.offset, 36),
+				strconv.FormatInt(ar.length, 36)))
 		}
 	}
 
-	if a.refcount > 0 {
-		tb.articles[msgID] = &a
+	if err := tb.writeIndex(tmp.Bytes()); err != nil {
+		return err
+	}
+
+	for _, g := range a.Refer {
+		g, ok := tb.groups[g]
+		if !ok {
+			continue
+		}
+
+		g.articles.Append(ar)
+		g.group.Low = int64(g.articles.Low() + 1)
+		g.group.High = int64(g.articles.High()+1) - 1
+		g.group.Count = int64(g.articles.Len())
+		log.Printf("%q new post: %v", g.group.Name, msgID)
+	}
+
+	if len(a.Refer) > 0 {
+		tb.articles[msgID] = ar
 	} else {
 		return nnn.ErrPostingFailed
 	}
@@ -309,7 +302,12 @@ func maybefatal(err error, f string, a ...interface{}) {
 func main() {
 	flag.Parse()
 
-	s := nnn.NewServer(&testBackend)
+	b := &testBackendType{}
+	if err := LoadIndex("testdb", b); err != nil {
+		panic(err)
+	}
+
+	s := nnn.NewServer(b)
 
 	handle := func(l net.Listener) {
 		for {
