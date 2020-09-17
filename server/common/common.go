@@ -128,3 +128,13 @@ func ExtractEmail(from string) string {
 	}
 	return ""
 }
+
+func MsgIDToRawMsgID(msgid string, msgidbuf []byte) [16]byte {
+	var x [16]byte
+	if msgidbuf != nil {
+		copy(x[:], msgidbuf)
+	} else {
+		copy(x[:], msgid)
+	}
+	return x
+}

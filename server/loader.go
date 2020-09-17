@@ -24,7 +24,7 @@ func LoadIndex(path string, db *backend.Backend) error {
 	}
 
 	db.Groups = map[string]*backend.Group{}
-	db.Articles = map[string]*common.ArticleRef{}
+	db.Articles = map[[16]byte]*common.ArticleRef{}
 	db.Mods = map[string]*common.ModInfo{}
 	db.Index = f
 	db.Data = df
@@ -109,12 +109,12 @@ func LoadIndex(path string, db *backend.Backend) error {
 			}
 
 			ar := &common.ArticleRef{}
-			ar.MsgID = string(msgid)
+			ar.RawMsgID = common.MsgIDToRawMsgID("", msgid)
 			ar.Offset = offset
 			ar.Length = length
 
 			g.Append(db, ar)
-			db.Articles[ar.MsgID] = ar
+			db.Articles[ar.RawMsgID] = ar
 		case 'M':
 			db.MaxLiveArticels, _ = strconv.Atoi(string(line[1:]))
 			log.Printf("#%d max live articles: %d", ln, db.MaxLiveArticels)
@@ -124,8 +124,8 @@ func LoadIndex(path string, db *backend.Backend) error {
 				}
 			}
 		case 'D':
-			msgid := string(line[1:])
-			delete(db.Articles, msgid)
+			msgid := line[1:]
+			delete(db.Articles, common.MsgIDToRawMsgID("", msgid))
 		case 'm':
 			mi := &common.ModInfo{}
 			if err := json.Unmarshal(line[1:], mi); err != nil {

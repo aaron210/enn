@@ -8,13 +8,17 @@ import (
 )
 
 type ArticleRef struct {
-	MsgID  string
-	Offset int64
-	Length int64
+	RawMsgID [16]byte
+	Offset   int64
+	Length   int64
+}
+
+func (ar *ArticleRef) MsgID() string {
+	return string(bytes.Trim(ar.RawMsgID[:], "\x00"))
 }
 
 func (ar *ArticleRef) String() string {
-	return fmt.Sprintf("<%s:%d-%d>", ar.MsgID, ar.Offset, ar.Offset+ar.Length)
+	return fmt.Sprintf("<%s:%d-%d>", ar.MsgID(), ar.Offset, ar.Offset+ar.Length)
 }
 
 type Article struct {

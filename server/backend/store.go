@@ -30,14 +30,14 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for _, a := range purged {
-			delete(b.Articles, a.MsgID)
+			delete(b.Articles, a.RawMsgID)
 		}
 	}
 }
 
 type Backend struct {
 	Groups      map[string]*Group
-	Articles    map[string]*common.ArticleRef
+	Articles    map[[16]byte]*common.ArticleRef
 	Mods        map[string]*common.ModInfo
 	Index, Data *os.File
 	AuthObject  interface{}
@@ -185,7 +185,7 @@ func (tb *Backend) DeleteArticle(msgid string) error {
 	}
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
-	delete(tb.Articles, msgid)
+	delete(tb.Articles, common.MsgIDToRawMsgID(msgid, nil))
 	return nil
 }
 
@@ -198,7 +198,7 @@ func (tb *Backend) internalGetGroup(name string) (*Group, bool) {
 
 func (tb *Backend) internalGetArticle(id string) (*common.ArticleRef, bool) {
 	tb.mu.RLock()
-	gs, ok := tb.Articles[id]
+	gs, ok := tb.Articles[common.MsgIDToRawMsgID(id, nil)]
 	tb.mu.RUnlock()
 	return gs, ok
 }
@@ -217,7 +217,7 @@ func (tb *Backend) GetArticle(group *nnn.Group, id string) (*nnn.Article, error)
 			log.Println("get article:", group, id, "not found")
 			return nil, nnn.ErrInvalidArticleNumber
 		}
-		msgID = ar.MsgID
+		msgID = ar.MsgID()
 	}
 	msgID = common.ExtractMsgID(msgID)
 	a, _ := tb.internalGetArticle(msgID)
@@ -239,7 +239,7 @@ func (tb *Backend) GetArticles(group *nnn.Group, from, to int64) ([]nnn.Numbered
 		if v == nil {
 			continue
 		}
-		a, ok := tb.internalGetArticle(v.MsgID)
+		a, ok := tb.internalGetArticle(v.MsgID())
 		if !ok {
 			continue
 		}
@@ -262,8 +262,6 @@ func (tb *Backend) AllowPost() bool {
 }
 
 func (tb *Backend) Post(article *nnn.Article) error {
-	return nnn.ErrNotAuthenticated
-
 	log.Printf("post: %#v", article.Header)
 
 	subject := article.Header.Get("Subject")
@@ -301,7 +299,7 @@ func (tb *Backend) Post(article *nnn.Article) error {
 		log.Println("post: predefined msgid:", msgID)
 		delete(article.Header, "Message-Id")
 	} else {
-		msgID = strconv.FormatInt(time.Now().Unix(), 36) + "-" + strconv.FormatUint(uint64(rand.Uint32()), 36)
+		msgID = strconv.FormatInt(time.Now().Unix(), 36) + strconv.FormatUint(uint64(rand.Uint32()), 36)
 	}
 
 	article.Header["X-Message-Id"] = []string{msgID}
@@ -324,7 +322,7 @@ func (tb *Backend) Post(article *nnn.Article) error {
 		}
 	}
 
-	if _, ok := tb.Articles[msgID]; ok {
+	if _, ok := tb.Articles[common.MsgIDToRawMsgID(msgID, nil)]; ok {
 		return nnn.ErrPostingFailed
 	}
 
@@ -332,7 +330,7 @@ func (tb *Backend) Post(article *nnn.Article) error {
 	if err != nil {
 		return err
 	}
-	ar.MsgID = msgID
+	ar.RawMsgID = common.MsgIDToRawMsgID(msgID, nil)
 
 	tmp := bytes.Buffer{}
 	for _, g := range a.Refer {
@@ -369,7 +367,7 @@ func (tb *Backend) Post(article *nnn.Article) error {
 	}
 
 	if postSuccess > 0 {
-		tb.Articles[msgID] = ar
+		tb.Articles[common.MsgIDToRawMsgID(msgID, nil)] = ar
 	} else {
 		return nnn.ErrPostingFailed
 	}
