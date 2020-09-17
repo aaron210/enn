@@ -179,7 +179,7 @@ func (s *session) dispatchCommand(cmd string, args []string,
 
 	handler, found := s.server.Handlers[strings.ToLower(cmd)]
 	if !found {
-		log.Println("Unknown command:", cmd, args)
+		log.Println("unknown command:", cmd, args)
 		handler = handleDefault
 	}
 	return handler(args, s, c)

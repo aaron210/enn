@@ -9,17 +9,11 @@ import (
 	"strconv"
 
 	"github.com/coyove/nnn"
-	"github.com/coyove/nnn/examples/common"
+	"github.com/coyove/nnn/server/backend"
+	"github.com/coyove/nnn/server/common"
 )
 
-type BaseGroupInfo struct {
-	Name     string
-	Desc     string
-	Announce string
-	Silence  bool
-}
-
-func LoadIndex(path string, db *testBackendType) error {
+func LoadIndex(path string, db *backend.Backend) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0777)
 	if err != nil {
 		return err
@@ -29,10 +23,12 @@ func LoadIndex(path string, db *testBackendType) error {
 		return err
 	}
 
-	db.groups = map[string]*groupStorage{}
-	db.articles = map[string]*articleRef{}
-	db.index = f
-	db.data = df
+	db.Groups = map[string]*backend.Group{}
+	db.Articles = map[string]*common.ArticleRef{}
+	db.Index = f
+	db.Data = df
+	db.ServerName = *ServerName
+	db.Init()
 
 	rd := bufio.NewReader(f)
 	for ln := 1; ; ln++ {
@@ -52,7 +48,7 @@ func LoadIndex(path string, db *testBackendType) error {
 				log.Printf("#%d %q invalid G header\n", ln, line)
 				continue
 			}
-			info := BaseGroupInfo{}
+			info := common.BaseGroupInfo{}
 			if err := json.Unmarshal(line[1:], &info); err != nil {
 				log.Printf("#%d %q invalid G header, json: %v\n", ln, line, err)
 				continue
@@ -61,17 +57,17 @@ func LoadIndex(path string, db *testBackendType) error {
 				log.Printf("#%d %q invalid G header, empty group name\n", ln, line)
 				continue
 			}
-			gs := &groupStorage{
-				group: &nnn.Group{
+			gs := &backend.Group{
+				Info: &nnn.Group{
 					Name:        info.Name,
 					Description: info.Desc,
 				},
-				articles: &common.HighLowSlice{MaxSize: maxArticles},
+				Articles: &common.HighLowSlice{MaxSize: maxArticles},
 			}
 			if info.Silence {
-				gs.group.Posting = nnn.PostingNotPermitted
+				gs.Info.Posting = nnn.PostingNotPermitted
 			}
-			db.groups[info.Name] = gs
+			db.Groups[info.Name] = gs
 			log.Println("load group:", info.Name)
 		case 'A':
 			if len(line) < 8 { // Agroup msgid offset length, 8 chars minimal
@@ -86,7 +82,7 @@ func LoadIndex(path string, db *testBackendType) error {
 			}
 			group, msgid, offsetbuf, lengthbuf := parts[0], parts[1], parts[2], parts[3]
 
-			g := db.groups[string(group)]
+			g := db.Groups[string(group)]
 			if g == nil {
 				log.Printf("#%d %q invalid A header, invalid group: %q\n", ln, line, group)
 				continue
@@ -104,13 +100,13 @@ func LoadIndex(path string, db *testBackendType) error {
 				continue
 			}
 
-			ar := &articleRef{}
-			ar.msgid = string(msgid)
-			ar.offset = offset
-			ar.length = length
+			ar := &common.ArticleRef{}
+			ar.MsgID = string(msgid)
+			ar.Offset = offset
+			ar.Length = length
 
-			g.articles.Append(ar)
-			db.articles[ar.msgid] = ar
+			g.Append(db, ar)
+			db.Articles[ar.MsgID] = ar
 		}
 	}
 	return nil

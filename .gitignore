@@ -1,9 +1,10 @@
 #*
 *~
-/examples/client/client
-/examples/couchserver/couchserver
-/examples/couchserver/groupcreator/groupcreator
-/examples/server/server
+/server/client/client
+/server/couchserver/couchserver
+/server/couchserver/groupcreator/groupcreator
+/server/server/server
 .DS_Store
 testdb
+.idea
 testdb.data
