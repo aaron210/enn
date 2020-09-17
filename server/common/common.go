@@ -100,9 +100,15 @@ func (s *HighLowSlice) Append(v *ArticleRef) ([]*ArticleRef, int) {
 	return purged, s.high
 }
 
-func PanicErr(err error, f string, a ...interface{}) {
+func PanicIf(err interface{}, f string, a ...interface{}) {
+	if v, ok := err.(bool); ok {
+		if v {
+			log.Fatalf(f, a...)
+		}
+		return
+	}
 	if err != nil {
-		f = strings.Replace(f, "%%err", err.Error(), -1)
+		f = strings.Replace(f, "%%err", strings.Replace(fmt.Sprint(err), "%", "%%", -1), -1)
 		log.Fatalf(f, a...)
 	}
 }
@@ -113,4 +119,12 @@ func ExtractMsgID(msgID string) string {
 		msgID = strings.Split(msgID, "@")[0]
 	}
 	return msgID
+}
+
+func ExtractEmail(from string) string {
+	start, end := strings.Index(from, "<"), strings.Index(from, ">")
+	if start > -1 && end > -1 && end > start {
+		return from[start+1 : end]
+	}
+	return ""
 }

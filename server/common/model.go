@@ -39,3 +39,8 @@ type BaseGroupInfo struct {
 	Announce string
 	Silence  bool
 }
+
+type ModInfo struct {
+	Email    string
+	Password string
+}

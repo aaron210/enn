@@ -25,10 +25,13 @@ func LoadIndex(path string, db *backend.Backend) error {
 
 	db.Groups = map[string]*backend.Group{}
 	db.Articles = map[string]*common.ArticleRef{}
+	db.Mods = map[string]*common.ModInfo{}
 	db.Index = f
 	db.Data = df
 	db.ServerName = *ServerName
 	db.Init()
+
+	const maxArticles = 100000
 
 	rd := bufio.NewReader(f)
 	for ln := 1; ; ln++ {
@@ -67,8 +70,13 @@ func LoadIndex(path string, db *backend.Backend) error {
 			if info.Silence {
 				gs.Info.Posting = nnn.PostingNotPermitted
 			}
-			db.Groups[info.Name] = gs
-			log.Println("load group:", info.Name)
+			if old := db.Groups[info.Name]; old != nil {
+				log.Printf("#%d UPDATE group: %s => %#v", ln, info.Name, info)
+				old.Info = gs.Info
+			} else {
+				log.Printf("#%d load group: %s", ln, info.Name)
+				db.Groups[info.Name] = gs
+			}
 		case 'A':
 			if len(line) < 8 { // Agroup msgid offset length, 8 chars minimal
 				log.Printf("#%d %q invalid A header\n", ln, line)
@@ -107,7 +115,37 @@ func LoadIndex(path string, db *backend.Backend) error {
 
 			g.Append(db, ar)
 			db.Articles[ar.MsgID] = ar
+		case 'M':
+			db.MaxLiveArticels, _ = strconv.Atoi(string(line[1:]))
+			log.Printf("#%d max live articles: %d", ln, db.MaxLiveArticels)
+			if db.MaxLiveArticels > 0 {
+				for _, g := range db.Groups {
+					g.Articles.MaxSize = db.MaxLiveArticels
+				}
+			}
+		case 'D':
+			msgid := string(line[1:])
+			delete(db.Articles, msgid)
+		case 'm':
+			mi := &common.ModInfo{}
+			if err := json.Unmarshal(line[1:], mi); err != nil {
+				log.Printf("#%d %q invalid mod info: %v\n", ln, line, err)
+				continue
+			}
+			log.Printf("#%d load mod info: %#v\n", ln, mi)
+			db.Mods[mi.Email] = mi
+		case 'c':
+			log.Printf("#%d remove mod info: %q\n", ln, line[1:])
+			delete(db.Mods, string(line[1:]))
 		}
 	}
+
+	// Finishing up
+	for _, g := range db.Groups {
+		g.Info.Count = int64(g.Articles.Len())
+		g.Info.High = int64(g.Articles.High())
+		g.Info.Low = int64(g.Articles.Low() + 1)
+	}
+	log.Printf("loader: %d groups, %d articles, %d mods", len(db.Groups), len(db.Articles), len(db.Mods))
 	return nil
 }

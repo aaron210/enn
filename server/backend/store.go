@@ -38,10 +38,12 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 type Backend struct {
 	Groups      map[string]*Group
 	Articles    map[string]*common.ArticleRef
+	Mods        map[string]*common.ModInfo
 	Index, Data *os.File
-	DataOffset  int64
-	ServerName  string
-	CurrentUser string
+	AuthObject  interface{}
+
+	ServerName      string
+	MaxLiveArticels int
 
 	filemu *sync.Mutex
 	mu     *sync.RWMutex
@@ -53,7 +55,7 @@ func (tb *Backend) Init() {
 }
 
 func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
-	const sep = "\x01\x23\x45\x56\x67\x89\xab\xcd\xef"
+	const sep = "\x01\x23\x45\x67\x89\xab\xcd\xef"
 
 	tb.filemu.Lock()
 	defer tb.filemu.Unlock()
@@ -86,14 +88,14 @@ func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
 		return nil, io.ErrShortWrite
 	}
 
-	if _, err := f.WriteString(sep); err != nil {
-		return nil, err
-	}
-
 	return &common.ArticleRef{
 		Offset: offset,
 		Length: int64(n),
 	}, nil
+}
+
+func (tb *Backend) WriteCommand(buf []byte) error {
+	return tb.writeIndex(buf)
 }
 
 func (tb *Backend) writeIndex(buf []byte) error {
@@ -154,15 +156,18 @@ func (tb *Backend) mkArticle(a *common.ArticleRef) (*nnn.Article, error) {
 
 	as := common.Article{}
 	if err := as.Unmarshal(buf); err != nil {
-		log.Printf("corrupted article ref %q => %v", buf, err)
+		log.Printf("corrupted article ref %v", err)
 		return nil, err
 	}
 
 	hdr := make(textproto.MIMEHeader, len(as.Headers))
 	for k, v := range as.Headers {
-		if k == "X-Message-Id" {
+		switch k {
+		case "X-Message-Id":
 			hdr["Message-Id"] = []string{"<" + v[0] + "@" + tb.ServerName + ">", v[0]}
-		} else {
+		case "X-Remote-Ip":
+			// Not viewable from client side
+		default:
 			hdr[k] = v
 		}
 	}
@@ -174,7 +179,13 @@ func (tb *Backend) mkArticle(a *common.ArticleRef) (*nnn.Article, error) {
 	}, nil
 }
 
-func (tb *Backend) DeleteArticle(group *nnn.Group, msgid string) error {
+func (tb *Backend) DeleteArticle(msgid string) error {
+	if err := tb.writeIndex([]byte("\nD" + msgid)); err != nil {
+		return err
+	}
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	delete(tb.Articles, msgid)
 	return nil
 }
 
@@ -223,7 +234,8 @@ func (tb *Backend) GetArticles(group *nnn.Group, from, to int64) ([]nnn.Numbered
 	}
 
 	var rv []nnn.NumberedArticle
-	for i, v := range gs.Articles.Slice(int(from-1), int(to-1)+1, false) {
+	refs, start, _ := gs.Articles.Slice(int(from-1), int(to-1)+1, false)
+	for i, v := range refs {
 		if v == nil {
 			continue
 		}
@@ -237,7 +249,7 @@ func (tb *Backend) GetArticles(group *nnn.Group, from, to int64) ([]nnn.Numbered
 			continue
 		}
 		rv = append(rv, nnn.NumberedArticle{
-			Num:     int64(i) + (from - 1) + 1,
+			Num:     int64(i+start) + 1,
 			Article: aa,
 		})
 	}
@@ -250,9 +262,28 @@ func (tb *Backend) AllowPost() bool {
 }
 
 func (tb *Backend) Post(article *nnn.Article) error {
+	return nnn.ErrNotAuthenticated
+
 	log.Printf("post: %#v", article.Header)
 
-	mps := GetMaxPostSize(tb)
+	subject := article.Header.Get("Subject")
+	switch strings.TrimSpace(subject) {
+	case "d":
+		if tb.AuthObject == nil {
+			return nnn.ErrNotAuthenticated
+		}
+		if !ImplIsMod(tb) {
+			return &nnn.NNTPError{Code: 441, Msg: "Not moderator"}
+		}
+		refer := article.Header.Get("References")
+		if refer == "" {
+			return &nnn.NNTPError{Code: 441, Msg: "Please refer an article"}
+		}
+		log.Println("delete article", tb.AuthObject, refer)
+		return tb.DeleteArticle(common.ExtractMsgID(refer))
+	}
+
+	mps := ImplMaxPostSize(tb)
 
 	buf := &bytes.Buffer{}
 	n, err := io.Copy(buf, io.LimitReader(article.Body, mps))
@@ -274,11 +305,23 @@ func (tb *Backend) Post(article *nnn.Article) error {
 	}
 
 	article.Header["X-Message-Id"] = []string{msgID}
+	article.Header["X-Remote-Ip"] = []string{fmt.Sprint(article.RemoteAddr)}
 
 	a := common.Article{
 		Headers: article.Header,
 		Body:    buf.String(),
 		Refer:   article.Header["Newsgroups"],
+	}
+
+	for i := len(a.Refer) - 1; i >= 0; i-- {
+		ar := a.Refer[i]
+		groups := strings.Split(ar, ",")
+		if len(groups) > 1 {
+			for i := range groups {
+				groups[i] = strings.TrimSpace(groups[i])
+			}
+			a.Refer = append(a.Refer[:i], append(groups, a.Refer[i+1:]...)...)
+		}
 	}
 
 	if _, ok := tb.Articles[msgID]; ok {
@@ -303,20 +346,29 @@ func (tb *Backend) Post(article *nnn.Article) error {
 		return err
 	}
 
+	postSuccess := 0
 	for _, g := range a.Refer {
 		g, ok := tb.Groups[g]
 		if !ok {
 			continue
 		}
 
+		if g.Info.Posting == nnn.PostingNotPermitted {
+			if !ImplIsMod(tb) {
+				continue
+			}
+		}
+
 		g.Append(tb, ar)
 		g.Info.Low = int64(g.Articles.Low() + 1)
 		g.Info.High = int64(g.Articles.High()+1) - 1
 		g.Info.Count = int64(g.Articles.Len())
+
 		log.Printf("post: %q new article %v", g.Info.Name, msgID)
+		postSuccess++
 	}
 
-	if len(a.Refer) > 0 {
+	if postSuccess > 0 {
 		tb.Articles[msgID] = ar
 	} else {
 		return nnn.ErrPostingFailed
@@ -325,9 +377,11 @@ func (tb *Backend) Post(article *nnn.Article) error {
 }
 
 func (tb *Backend) Authorized() bool {
-	return true
+	return ImplAuth(tb, "", "") == nil
 }
 
 func (tb *Backend) Authenticate(user, pass string) (nnn.Backend, error) {
-	return nil, nnn.ErrAuthRejected
+	tb2 := *tb
+	err := ImplAuth(&tb2, user, pass)
+	return &tb2, err
 }
