@@ -3,7 +3,8 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/json"
+	"encoding/binary"
+	"encoding/gob"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +55,10 @@ func (tb *testBackendType) writeData(buf []byte) (*articleRef, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	f := tb.data
+
+	if err := binary.Write(f, binary.BigEndian, int64(len(buf))); err != nil {
+		return nil, err
+	}
 
 	if _, err := f.Seek(0, 2); err != nil {
 		return nil, err
@@ -130,7 +135,7 @@ func (tb *testBackendType) mkArticle(a *articleRef) (*nnn.Article, error) {
 	}
 
 	as := articleStorage{}
-	if err := json.Unmarshal(buf, &as); err != nil {
+	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&as); err != nil {
 		return nil, err
 	}
 
@@ -244,8 +249,9 @@ func (tb *testBackendType) Post(article *nnn.Article) error {
 		return nnn.ErrPostingFailed
 	}
 
-	jsonbuf, _ := json.Marshal(a)
-	ar, err := tb.writeData(jsonbuf)
+	mbuf := &bytes.Buffer{}
+	gob.NewEncoder(mbuf).Encode(&a)
+	ar, err := tb.writeData(mbuf.Bytes())
 	if err != nil {
 		return err
 	}
