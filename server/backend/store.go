@@ -5,21 +5,20 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
-	"math/rand"
 	"net/textproto"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/coyove/nnn"
-	"github.com/coyove/nnn/server/common"
+	"github.com/coyove/common/lru"
+	"github.com/coyove/enn"
+	"github.com/coyove/enn/server/common"
 )
 
 type Group struct {
-	Info     *nnn.Group
+	Group    *enn.Group
+	BaseInfo *common.BaseGroupInfo
 	Articles *common.HighLowSlice
 }
 
@@ -27,6 +26,12 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 	purged, _ := g.Articles.Append(ar)
 
 	if len(purged) > 0 {
+		tmp := bytes.Buffer{}
+		for _, p := range purged {
+			tmp.WriteString(fmt.Sprintf("\nD%s", p.MsgID()))
+		}
+		common.L("purge in append: %v, len: %d", b.writeIndex(tmp.Bytes()), len(purged))
+
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for _, a := range purged {
@@ -36,23 +41,29 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 }
 
 type Backend struct {
-	Groups     map[string]*Group
-	Articles   map[[16]byte]*common.ArticleRef
-	Mods       map[string]*common.ModInfo
-	Index      *os.File
-	Data       []*os.File
-	AuthObject interface{}
+	Groups       map[string]*Group
+	Articles     map[[16]byte]*common.ArticleRef
+	Mods         map[string]*common.ModInfo
+	Index        *os.File
+	Data         []*os.File
+	AuthObject   interface{}
+	PostInterval time.Duration
 
-	ServerName      string
-	MaxLiveArticels int
+	ServerName string
 
-	filemu *sync.Mutex
-	mu     *sync.RWMutex
+	ipCache *lru.Cache
+	filemu  *sync.Mutex
+	mu      *sync.RWMutex
 }
 
 func (tb *Backend) Init() {
 	tb.mu = new(sync.RWMutex)
 	tb.filemu = new(sync.Mutex)
+	tb.ipCache = lru.NewCache(1e3)
+
+	if tb.PostInterval == 0 {
+		tb.PostInterval = time.Minute
+	}
 }
 
 func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
@@ -118,41 +129,45 @@ func (tb *Backend) writeIndex(buf []byte) error {
 	return nil
 }
 
-func (tb *Backend) ListGroups(max int) ([]*nnn.Group, error) {
+func (tb *Backend) ListGroups(max int) ([]*enn.Group, error) {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 
-	var rv []*nnn.Group
+	var rv []*enn.Group
 	for _, g := range tb.Groups {
-		rv = append(rv, g.Info)
+		rv = append(rv, g.Group)
 	}
 	return rv, nil
 }
 
-func (tb *Backend) GetGroup(name string) (*nnn.Group, error) {
+func (tb *Backend) GetGroup(name string) (*enn.Group, error) {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 
 	group, ok := tb.Groups[name]
 	if !ok {
-		return nil, nnn.ErrNoSuchGroup
+		return nil, enn.ErrNoSuchGroup
 	}
-	return group.Info, nil
+	return group.Group, nil
 }
 
-func (tb *Backend) mkArticle(a *common.ArticleRef) (A *nnn.Article, E error) {
+func (tb *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Article, E error) {
+	if a.Index >= len(tb.Data) {
+		return nil, enn.ErrInvalidArticleNumber
+	}
+
 	name := tb.Data[a.Index].Name()
 	f, err := os.OpenFile(name, os.O_RDONLY, 0777)
 	if err != nil {
-		log.Println("open", name, err)
-		return nil, nnn.ErrServerBad
+		common.E("open %q: %v", name, err)
+		return nil, enn.ErrServerBad
 	}
 
 	defer func() {
 		f.Close()
 		if E != nil {
-			log.Println("open", name, E)
-			E = nnn.ErrInvalidArticleNumber
+			common.E("open %q: %v", name, E)
+			E = enn.ErrInvalidArticleNumber
 		}
 	}()
 
@@ -168,14 +183,10 @@ func (tb *Backend) mkArticle(a *common.ArticleRef) (A *nnn.Article, E error) {
 		return nil, err
 	}
 
-	buf := make([]byte, a.Length)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return nil, err
-	}
-
+	rd := io.LimitReader(f, a.Length)
 	as := common.Article{}
-	if err := as.Unmarshal(buf); err != nil {
-		log.Printf("corrupted article ref %v", err)
+	if err := as.Unmarshal(rd, headerOnly); err != nil {
+		common.E("corrupted article ref %v", err)
 		return nil, err
 	}
 
@@ -190,12 +201,14 @@ func (tb *Backend) mkArticle(a *common.ArticleRef) (A *nnn.Article, E error) {
 			hdr[k] = v
 		}
 	}
-	return &nnn.Article{
+
+	na := &enn.Article{
 		Header: hdr,
-		Body:   strings.NewReader(as.Body),
-		Bytes:  len(as.Body),
-		Lines:  strings.Count(as.Body, "\n"),
-	}, nil
+		Body:   bytes.NewReader(as.Body),
+	}
+	na.Bytes, _ = strconv.Atoi(hdr.Get("X-Length"))
+	na.Lines, _ = strconv.Atoi(hdr.Get("X-Lines"))
+	return na, nil
 }
 
 func (tb *Backend) DeleteArticle(msgid string) error {
@@ -222,37 +235,37 @@ func (tb *Backend) internalGetArticle(id string) (*common.ArticleRef, bool) {
 	return gs, ok
 }
 
-func (tb *Backend) GetArticle(group *nnn.Group, id string) (*nnn.Article, error) {
+func (tb *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Article, error) {
 	msgID := id
 
 	if intId, err := strconv.ParseInt(id, 10, 64); err == nil {
 		groupStorage, ok := tb.internalGetGroup(group.Name)
 		if !ok {
-			return nil, nnn.ErrNoSuchGroup
+			return nil, enn.ErrNoSuchGroup
 		}
 
 		ar, _ := groupStorage.Articles.Get(int(intId - 1))
 		if ar == nil {
-			log.Println("get article:", group, id, "not found")
-			return nil, nnn.ErrInvalidArticleNumber
+			common.E("get article %q in %q not found ", id, group)
+			return nil, enn.ErrInvalidArticleNumber
 		}
 		msgID = ar.MsgID()
 	}
 	msgID = common.ExtractMsgID(msgID)
 	a, _ := tb.internalGetArticle(msgID)
 	if a == nil {
-		return nil, nnn.ErrInvalidMessageID
+		return nil, enn.ErrInvalidMessageID
 	}
-	return tb.mkArticle(a)
+	return tb.mkArticle(a, ho)
 }
 
-func (tb *Backend) GetArticles(group *nnn.Group, from, to int64) ([]nnn.NumberedArticle, error) {
+func (tb *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn.NumberedArticle, error) {
 	gs, ok := tb.internalGetGroup(group.Name)
 	if !ok {
-		return nil, nnn.ErrNoSuchGroup
+		return nil, enn.ErrNoSuchGroup
 	}
 
-	var rv []nnn.NumberedArticle
+	var rv []enn.NumberedArticle
 	refs, start, _ := gs.Articles.Slice(int(from-1), int(to-1)+1, false)
 	for i, v := range refs {
 		if v == nil {
@@ -262,12 +275,12 @@ func (tb *Backend) GetArticles(group *nnn.Group, from, to int64) ([]nnn.Numbered
 		if !ok {
 			continue
 		}
-		aa, err := tb.mkArticle(a)
+		aa, err := tb.mkArticle(a, ho)
 		if err != nil {
-			log.Println("failed to get article:", v.MsgID, err)
+			common.E("failed to get article %q: %v", v.MsgID(), err)
 			continue
 		}
-		rv = append(rv, nnn.NumberedArticle{
+		rv = append(rv, enn.NumberedArticle{
 			Num:     int64(i+start) + 1,
 			Article: aa,
 		})
@@ -280,132 +293,11 @@ func (tb *Backend) AllowPost() bool {
 	return true
 }
 
-func (tb *Backend) Post(article *nnn.Article) error {
-	log.Printf("post: %#v", article.Header)
-
-	subject := article.Header.Get("Subject")
-	switch strings.TrimSpace(subject) {
-	case "d":
-		if tb.AuthObject == nil {
-			return nnn.ErrNotAuthenticated
-		}
-		if !ImplIsMod(tb) {
-			return &nnn.NNTPError{Code: 441, Msg: "Not moderator"}
-		}
-		refer := article.Header.Get("References")
-		if refer == "" {
-			return &nnn.NNTPError{Code: 441, Msg: "Please refer an article"}
-		}
-		log.Println("delete article", tb.AuthObject, refer)
-		return tb.DeleteArticle(common.ExtractMsgID(refer))
-	}
-
-	mps := ImplMaxPostSize(tb)
-
-	buf := &bytes.Buffer{}
-	n, err := io.Copy(buf, io.LimitReader(article.Body, mps))
-	if err != nil {
-		return err
-	}
-
-	if n >= mps {
-		return &nnn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post too large (max %d)", mps)}
-	}
-
-	var msgID string
-	if msgid := article.Header["Message-Id"]; len(msgid) > 0 {
-		msgID = common.ExtractMsgID(msgid[0])
-		log.Println("post: predefined msgid:", msgID)
-		delete(article.Header, "Message-Id")
-	} else {
-		msgID = strconv.FormatInt(time.Now().Unix(), 36) + strconv.FormatUint(uint64(rand.Uint32()), 36)
-	}
-
-	article.Header["X-Message-Id"] = []string{msgID}
-	article.Header["X-Remote-Ip"] = []string{fmt.Sprint(article.RemoteAddr)}
-
-	a := common.Article{
-		Headers: article.Header,
-		Body:    buf.String(),
-		Refer:   article.Header["Newsgroups"],
-	}
-
-	for i := len(a.Refer) - 1; i >= 0; i-- {
-		ar := a.Refer[i]
-		groups := strings.Split(ar, ",")
-		if len(groups) > 1 {
-			for i := range groups {
-				groups[i] = strings.TrimSpace(groups[i])
-			}
-			a.Refer = append(a.Refer[:i], append(groups, a.Refer[i+1:]...)...)
-		}
-	}
-
-	if _, ok := tb.Articles[common.MsgIDToRawMsgID(msgID, nil)]; ok {
-		return nnn.ErrPostingFailed
-	}
-
-	ar, err := tb.writeData(a.Marshal())
-	if err != nil {
-		return err
-	}
-	ar.RawMsgID = common.MsgIDToRawMsgID(msgID, nil)
-
-	tmp := bytes.Buffer{}
-	for _, g := range a.Refer {
-		if g, ok := tb.Groups[g]; ok {
-			tmp.WriteString(fmt.Sprintf("\nA%s %s %d %s %s",
-				g.Info.Name,
-				msgID,
-				ar.Index,
-				strconv.FormatInt(ar.Offset, 36),
-				strconv.FormatInt(ar.Length, 36)))
-		}
-	}
-	if err := tb.writeIndex(tmp.Bytes()); err != nil {
-		return err
-	}
-
-	postSuccess := 0
-	for _, g := range a.Refer {
-		g, ok := tb.Groups[g]
-		if !ok {
-			continue
-		}
-
-		if g.Info.Posting == nnn.PostingNotPermitted {
-			if !ImplIsMod(tb) {
-				continue
-			}
-		}
-
-		if g.Info.MaxPostSize != 0 && n > g.Info.MaxPostSize*4/3 {
-			log.Printf("post: %q large article %v (%d <-> %d)", g.Info.Name, msgID, n, g.Info.MaxPostSize*4/3)
-			continue
-		}
-
-		g.Append(tb, ar)
-		g.Info.Low = int64(g.Articles.Low() + 1)
-		g.Info.High = int64(g.Articles.High()+1) - 1
-		g.Info.Count = int64(g.Articles.Len())
-
-		log.Printf("post: %q new article %v", g.Info.Name, msgID)
-		postSuccess++
-	}
-
-	if postSuccess > 0 {
-		tb.Articles[common.MsgIDToRawMsgID(msgID, nil)] = ar
-	} else {
-		return nnn.ErrPostingFailed
-	}
-	return nil
-}
-
 func (tb *Backend) Authorized() bool {
 	return ImplAuth(tb, "", "") == nil
 }
 
-func (tb *Backend) Authenticate(user, pass string) (nnn.Backend, error) {
+func (tb *Backend) Authenticate(user, pass string) (enn.Backend, error) {
 	tb2 := *tb
 	err := ImplAuth(&tb2, user, pass)
 	return &tb2, err

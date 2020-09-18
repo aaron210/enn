@@ -1,4 +1,4 @@
-package nnn
+package enn
 
 import (
 	"math"

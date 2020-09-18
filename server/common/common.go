@@ -1,18 +1,20 @@
 package common
 
 import (
+	"encoding/base64"
 	"fmt"
-	"log"
 	"math/rand"
+	"regexp"
 	"strings"
 	"sync"
 )
 
 type HighLowSlice struct {
-	mu        sync.RWMutex
-	d         []*ArticleRef
-	MaxSize   int
-	high, low int
+	mu            sync.RWMutex
+	d             []*ArticleRef
+	MaxSize       int
+	NoPurgeNotify bool
+	high, low     int
 }
 
 func (s *HighLowSlice) Len() int { return s.high }
@@ -86,7 +88,7 @@ func (s *HighLowSlice) Append(v *ArticleRef) ([]*ArticleRef, int) {
 	s.high++
 
 	var purged []*ArticleRef
-	if len(s.d) > s.MaxSize {
+	if s.MaxSize > 0 && len(s.d) > s.MaxSize {
 		p := 1 / float64(len(s.d)-s.MaxSize+1)
 		if rand.Float64() > p {
 			x := len(s.d) - s.MaxSize
@@ -97,19 +99,22 @@ func (s *HighLowSlice) Append(v *ArticleRef) ([]*ArticleRef, int) {
 			s.d = s.d[:s.MaxSize]
 		}
 	}
+	if s.NoPurgeNotify {
+		purged = nil
+	}
 	return purged, s.high
 }
 
 func PanicIf(err interface{}, f string, a ...interface{}) {
 	if v, ok := err.(bool); ok {
 		if v {
-			log.Fatalf(f, a...)
+			F(f, a...)
 		}
 		return
 	}
 	if err != nil {
 		f = strings.Replace(f, "%%err", strings.Replace(fmt.Sprint(err), "%", "%%", -1), -1)
-		log.Fatalf(f, a...)
+		F(f, a...)
 	}
 }
 
@@ -138,3 +143,28 @@ func MsgIDToRawMsgID(msgid string, msgidbuf []byte) [16]byte {
 	}
 	return x
 }
+
+func FormatSize(v int64) string {
+	if v > 1000*1000 {
+		return fmt.Sprintf("%.2fM", float64(v)/1e6)
+	}
+	if v > 1000 {
+		return fmt.Sprintf("%.2fK", float64(v)/1e3)
+	}
+	return fmt.Sprintf("%dB", v)
+}
+
+var TranslateEncoding = func() func(string) string {
+	// =?UTF-8?B?....?= TODO: more encodings
+	var r = regexp.MustCompile(`=\?UTF-8\?B\?(\S+)\?=`)
+	return func(in string) string {
+		outs := r.FindAllStringSubmatch(in, -1)
+		if len(outs) == 1 && len(outs[0]) == 2 {
+			buf, err := base64.StdEncoding.DecodeString(outs[0][1])
+			if err == nil {
+				return string(buf)
+			}
+		}
+		return in
+	}
+}()

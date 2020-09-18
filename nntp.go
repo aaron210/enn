@@ -1,15 +1,16 @@
-package nnn
+package enn
 
 import (
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coyove/nnn/server/common"
 )
 
 // PostingStatus type for groups.
@@ -43,7 +44,6 @@ type Group struct {
 	High        int64
 	Low         int64
 	Posting     PostingStatus
-	MaxPostSize int64
 }
 
 // An Article that may appear in one or more groups.
@@ -119,6 +119,8 @@ var ErrNotAuthenticated = &NNTPError{480, "authentication required"}
 
 var ErrServerBad = &NNTPError{500, "Server bad"}
 
+var ErrNotMod = &NNTPError{Code: 441, Msg: "Not moderator"}
+
 // Handler is a low-level protocol handler
 type Handler func(args []string, s *session, c *textproto.Conn) error
 
@@ -133,8 +135,8 @@ type NumberedArticle struct {
 type Backend interface {
 	ListGroups(max int) ([]*Group, error)
 	GetGroup(name string) (*Group, error)
-	GetArticle(group *Group, id string) (*Article, error)
-	GetArticles(group *Group, from, to int64) ([]NumberedArticle, error)
+	GetArticle(group *Group, id string, headerOnly bool) (*Article, error)
+	GetArticles(group *Group, from, to int64, headerOnly bool) ([]NumberedArticle, error)
 	Authorized() bool
 	// Authenticate and optionally swap out the backend for this session.
 	// You may return nil to continue using the same backend.
@@ -200,7 +202,7 @@ func (s *session) dispatchCommand(cmd string, args []string, c *textproto.Conn) 
 
 	handler, found := s.server.Handlers[cmd]
 	if !found {
-		log.Println("unknown command:", cmd, args)
+		common.E("unknown command: %v %v", cmd, args)
 		handler = handleDefault
 	}
 	return handler(args, s, c)
@@ -210,7 +212,7 @@ func (s *session) dispatchCommand(cmd string, args []string, c *textproto.Conn) 
 func (s *Server) Process(nc net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println("panic:", nc.RemoteAddr(), r)
+			common.E("panic: %v: %v", nc.RemoteAddr(), r)
 		}
 		nc.Close()
 	}()
@@ -230,11 +232,12 @@ func (s *Server) Process(nc net.Conn) {
 		l, err := c.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				log.Println("client.ReadLine:", nc.RemoteAddr(), err)
+				common.E("client.ReadLine: %v: %v", nc.RemoteAddr(), err)
 			}
 			return
 		}
 		cmd := strings.Split(l, " ")
+		// common.L("%v", cmd)
 		args := []string{}
 		if len(cmd) > 1 {
 			args = cmd[1:]
@@ -248,7 +251,7 @@ func (s *Server) Process(nc net.Conn) {
 		} else {
 			wait := sess.throtTimer.Add(-s.ThrotCmdWindow).Sub(now)
 			if wait > time.Millisecond*250 {
-				log.Printf("%v: throt wait %v", nc.RemoteAddr(), wait)
+				common.L("%v: throt wait %v", nc.RemoteAddr(), wait)
 				time.Sleep(wait)
 			}
 		}
@@ -260,7 +263,7 @@ func (s *Server) Process(nc net.Conn) {
 			case isNNTPError:
 				c.PrintfLine(err.Error())
 			default:
-				log.Println(cmd, nc.RemoteAddr(), err)
+				common.E("%q at %v: %v", cmd, nc.RemoteAddr(), err)
 				return
 			}
 		}

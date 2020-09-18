@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/coyove/nnn"
-	"github.com/coyove/nnn/server/common"
+	"github.com/coyove/enn/server/common"
 )
 
 func splitCommand(a string, n int) []string {
@@ -55,19 +55,28 @@ func HandleCommand() bool {
 
 	if *GroupAdd != "" {
 		x := splitCommand(*GroupAdd, 2)
-		p := bytes.NewBufferString("\nG")
 		gs := db.Groups[x[0]]
 		if gs == nil {
-			json.NewEncoder(p).Encode(common.BaseGroupInfo{
-				Name: x[0],
-				Desc: x[1],
-			})
-			common.PanicIf(db.WriteCommand(p.Bytes()), "%%err")
+			common.PanicIf(db.WriteCommand(groupInfoAdapter(&common.BaseGroupInfo{
+				Name:       x[0],
+				Desc:       x[1],
+				MaxLives:   1000,
+				CreateTime: time.Now().Unix(),
+			})), "%%err")
 		} else {
-			gs.Info.Name = x[0]
-			gs.Info.Description = x[1]
-			common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.Info)), "%%err")
+			gs.BaseInfo.Name = x[0]
+			gs.BaseInfo.Desc = x[1]
+			common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
 		}
+		return true
+	}
+
+	if *GroupMaxLives != "" {
+		x := splitCommand(*GroupMaxLives, 2)
+		gs := db.Groups[x[0]]
+		common.PanicIf(gs == nil, "group %q not existed", x[0])
+		gs.BaseInfo.MaxLives, _ = strconv.ParseInt(x[1], 10, 64)
+		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
 		return true
 	}
 
@@ -77,34 +86,25 @@ func HandleCommand() bool {
 		common.PanicIf(gs == nil, "group %q not existed", x[0])
 		x[1] = strings.Replace(strings.ToLower(x[1]), "k", "000", -1)
 		x[1] = strings.Replace(strings.ToLower(x[1]), "m", "000000", -1)
-		gs.Info.MaxPostSize, _ = strconv.ParseInt(x[1], 10, 64)
-		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.Info)), "%%err")
+		gs.BaseInfo.MaxPostSize, _ = strconv.ParseInt(x[1], 10, 64)
+		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
 		return true
 	}
 
 	if *GroupSilence != "" {
-		x := splitCommand(*GroupSilence, 1)
+		x := splitCommand(*GroupSilence, 2)
 		gs := db.Groups[x[0]]
 		common.PanicIf(gs == nil, "group %q not existed", x[0])
-		if gs.Info.Posting == nnn.PostingNotPermitted {
-			gs.Info.Posting = nnn.PostingPermitted
-		} else {
-			gs.Info.Posting = nnn.PostingNotPermitted
-		}
-		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.Info)), "%%err")
+		gs.BaseInfo.Posting = x[1][0]
+		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
 		return true
 	}
 
 	return false
 }
 
-func groupInfoAdapter(info *nnn.Group) []byte {
+func groupInfoAdapter(info *common.BaseGroupInfo) []byte {
 	p := bytes.NewBufferString("\nG")
-	json.NewEncoder(p).Encode(common.BaseGroupInfo{
-		Name:        info.Name,
-		Desc:        info.Description,
-		Silence:     info.Posting == nnn.PostingNotPermitted,
-		MaxPostSize: info.MaxPostSize,
-	})
+	json.NewEncoder(p).Encode(info)
 	return p.Bytes()
 }

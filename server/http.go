@@ -2,142 +2,49 @@ package main
 
 import (
 	"fmt"
-	"html/template"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
-	"github.com/coyove/nnn"
-	"github.com/coyove/nnn/server/common/dateparse"
+	"github.com/coyove/enn"
+	"github.com/coyove/enn/server/common"
+	"github.com/coyove/enn/server/common/dateparse"
+	"github.com/coyove/enn/server/common/font"
 )
 
-func HandleGroup(w http.ResponseWriter, r *http.Request) {
-	// 	name := r.FormValue("name")
-	// 	page, _ := strconv.Atoi(f.FormValue("p"))
-	// 	n, _ := strconv.Atoi(f.FormValue("n"))
-	// 	if n == 0 {
-	// 		n = 10
-	// 	}
-	//
-	// 	info, err := db.GetGroup(name)
-	// 	if err != nil {
-	// 		log.Println("http group:", name, err)
-	// 		w.WriteHeader(500)
-	// 		return
-	// 	}
-	//
-	// 	totalpage := int(math.Ceil(float64(info.Count) / float64(n)))
-	// 	if page < 1 {
-	// 		page = 1
-	// 	}
-	// 	if page > totalpage {
-	// 		page = totalpage
-	// 	}
-	// 	start, end := (page-1)*n, page*n
-	// 	if end > int(info.Count) {
-	// 		end = int(info.Count)
-	// 	}
-	// 	start, end = int(info.Count)-1-start, int(info.Count)-end
-	//
-	// 	w.Header().Add("Content-Type", "text/html")
-	// 	template.Must(template.New("").Parse(`
-	// <meta charset="utf-8">
-	// {{.High}}
-	// `)).Execute(w, info)
-}
-
-var indexPage = template.Must(template.New("").Funcs(template.FuncMap{
-	"size": func(v int64) string {
-		if v > 1000*1000 {
-			return fmt.Sprintf("%.2fM", float64(v)/1e6)
-		}
-		if v > 1000 {
-			return fmt.Sprintf("%.2fK", float64(v)/1e3)
-		}
-		if v == 0 {
-			return "Default"
-		}
-		return fmt.Sprintf("%d", v)
-	},
-}).Parse(`
-<meta charset="utf-8">
-<style> 
-    .ptable {
-	font-family: lucida sans unicode,lucida grande,Sans-Serif;
-	background: #fff;
-	width: 100%;
-	border-collapse: collapse;
-	text-align: left;
-    }
-    .ptable th {
-	font-size: 14px;
-	font-weight: 400;
-	color: #039;
-	border-bottom: 2px solid #6678b1;
-	padding: 10px 8px
-    }
-    .ptable td {
-	border-bottom: 1px solid #ccc;
-	color: #669;
-	padding: 6px 8px
-    }
-    .ptable tbody tr:hover td {
-	color: #009
-    }
-.ptable [nowrap] {
-width: 1%;
-white-space: nowrap;
-}
-.ptable span.low {
-color: #ccc;
-}
-.ptable td input {
-font: inherit;
-border: none;
-width: 100%;
-}
-</style>
-<table class="ptable">
-<tr>
-	<th>Name</th>
-	<th>Description</th>
-	<th nowrap>Max Post Size</th>
-	<th nowrap>Articles / <span class=low>Low</span></th>
-	<th nowrap>Latest</th>
-</tr>
-{{range .}}
-<tr>
-	{{$disabled := eq .Posting 'n'}}
-	<td nowrap>{{if $disabled}}<s>{{end}}{{.Name}}</td>
-	<td><input readonly value="{{.Description}}"></td>
-	<td nowrap>{{size .MaxPostSize}}</td>
-	<td nowrap>{{.Count}} / <span class=low>{{.Low}}</span></td>
-	<td nowrap>{{.LastArticleTime}}</td>
-</tr>
-{{end}}
-</table>
-`))
-
 func HandleGroups(w http.ResponseWriter, r *http.Request) {
+	const timeFormat = "2006-01-02 15:04"
+
 	groups, _ := db.ListGroups(0)
 
 	payload := make([]struct {
 		LastArticleTime string
-		*nnn.Group
+		LastArticleSub  string
+		*enn.Group
+		*common.BaseGroupInfo
 	}, len(groups))
+
 	for i := range payload {
 		g := groups[i]
 		payload[i].Group = g
+		payload[i].BaseGroupInfo = db.Groups[g.Name].BaseInfo
+
 		if g.High == 0 {
 			continue
 		}
 
-		a, _ := db.GetArticle(g, strconv.FormatInt(g.High, 10))
+		a, _ := db.GetArticle(g, strconv.FormatInt(g.High, 10), true)
 		if a != nil {
 			payload[i].LastArticleTime = a.Header.Get("Date")
+			sub := a.Header.Get("Subject")
+			sub = common.TranslateEncoding(sub)
+			payload[i].LastArticleSub = sub
+
 			t, err := dateparse.ParseAny(payload[i].LastArticleTime)
 			if err == nil {
-				payload[i].LastArticleTime = t.Format("2006-01-02 15:04")
+				payload[i].LastArticleTime = t.Format(timeFormat)
 			}
 		}
 	}
@@ -146,7 +53,76 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 		return payload[i].LastArticleTime > payload[j].LastArticleTime
 	})
 
-	w.Header().Add("Content-Type", "text/html")
-	w.Write([]byte(fmt.Sprintf("<title>%s</title>", *ServerName)))
-	indexPage.Execute(w, payload)
+	tb := font.Textbox{
+		Width:     500,
+		Margin:    10,
+		LineSpace: 4,
+		CharSpace: 1,
+	}
+
+	tb.Begin()
+	tb.Write(fmt.Sprintf("%s 运行:%v 更新:%v\nMod:", *ServerName, time.Since(startAt)/1e9*1e9, time.Now().Format("060102150405")))
+
+	for k := range db.Mods {
+		tb.Write(" ")
+		tb.Write(k)
+	}
+	tb.Write("\n\n")
+
+	for _, g := range payload {
+		tb.Gray = true
+		if g.LastArticleTime != "" {
+			tb.Write(g.LastArticleTime)
+		} else {
+			tb.Strikeline = true
+			tb.Write(strings.Repeat(" ", len(timeFormat)))
+			tb.Strikeline = false
+		}
+		tb.Gray = false
+
+		tb.Write("  ")
+		tb.Strikeline = g.Group.Posting == enn.PostingNotPermitted
+		tb.Bold = true
+		tb.Write(g.BaseGroupInfo.Name)
+		tb.Strikeline = false
+		tb.Bold = false
+		tb.Write("  ")
+
+		tb.Write(strconv.FormatInt(g.Group.Count, 10))
+		tb.Write("篇 ")
+		tb.Gray = true
+		tb.Write(fmt.Sprintf("-%d(%d) ", g.Low, g.MaxLives))
+		tb.Gray = false
+
+		if g.MaxPostSize != 0 {
+			tb.Underline = true
+			tb.Write("限发文大小:" + common.FormatSize(g.MaxPostSize))
+			tb.Underline = false
+			tb.Write(" ")
+		}
+
+		tb.Write("\n")
+
+		if g.LastArticleSub != "" {
+			tb.Green = true
+			tb.Indent = len(timeFormat) + 2
+			tb.Write("最新: " + g.LastArticleSub)
+			tb.Green = false
+			tb.Indent = 0
+			tb.Write("\n")
+		}
+
+		if g.Description != "" {
+			tb.Blue = true
+			tb.Indent = len(timeFormat) + 2
+			tb.Write(g.Description)
+			tb.Blue = false
+			tb.Indent = 0
+			tb.Write("\n")
+		}
+
+	}
+
+	w.Header().Add("Content-Type", "image/png")
+	tb.End(w)
 }

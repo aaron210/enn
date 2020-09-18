@@ -4,15 +4,14 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/coyove/nnn"
-	"github.com/coyove/nnn/server/backend"
-	"github.com/coyove/nnn/server/common"
+	"github.com/coyove/enn"
+	"github.com/coyove/enn/server/backend"
+	"github.com/coyove/enn/server/common"
 )
 
 var (
@@ -22,11 +21,15 @@ var (
 	GroupAdd       = flag.String("group-create", "", "name,desc")
 	GroupSilence   = flag.String("group-post", "", "name")
 	GroupMaxPostSz = flag.String("group-mps", "", "")
+	GroupMaxLives  = flag.String("group-lives", "", "")
 	ModAdd         = flag.String("mod-add", "", "email,pass")
 	ModDel         = flag.String("mod-del", "", "email")
 )
 
-var db = &backend.Backend{}
+var (
+	db      = &backend.Backend{}
+	startAt = time.Now()
+)
 
 type authObject struct {
 	user, pass string
@@ -46,7 +49,6 @@ func (obj *authObject) isMod(db *backend.Backend) bool {
 func main() {
 	rand.Seed(time.Now().Unix())
 	flag.Parse()
-	log.SetFlags(log.Lshortfile | log.Ltime | log.Lmicroseconds | log.Ldate)
 
 	backend.ImplMaxPostSize = func(b *backend.Backend) int64 {
 		return 1024 * 1024 * 3
@@ -69,12 +71,12 @@ func main() {
 		return
 	}
 
-	s := nnn.NewServer(db)
+	s := enn.NewServer(db)
 	handle := func(l net.Listener) {
 		for {
 			c, err := l.Accept()
 			if err != nil {
-				log.Println("handle:", err)
+				common.E("handle: %v", err)
 				return
 			}
 			go s.Process(c)
@@ -83,7 +85,7 @@ func main() {
 
 	var plainBind, tlsBind, httpBind string
 	fmt.Sscanf(*Listen, "%s %s %s", &plainBind, &tlsBind, &httpBind)
-	log.Printf("bind: plain=%q, tls=%q, http=%q", plainBind, tlsBind, httpBind)
+	common.L("bind: plain=%q, tls=%q, http=%q", plainBind, tlsBind, httpBind)
 
 	if plainBind != "" {
 		a, err := net.ResolveTCPAddr("tcp", plainBind)
@@ -106,7 +108,6 @@ func main() {
 
 	if httpBind != "" {
 		http.HandleFunc("/", HandleGroups)
-		http.HandleFunc("/group", HandleGroup)
 		go http.ListenAndServe(httpBind, nil)
 	}
 

@@ -1,4 +1,4 @@
-package nnn
+package enn
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ func handleStat(args []string, s *session, c *textproto.Conn) error {
 	if len(args) != 1 {
 		return ErrSyntax
 	}
-	a, err := s.backend.GetArticle(s.group, args[0])
+	a, err := s.backend.GetArticle(s.group, args[0], true)
 	if err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func handleOver(args []string, s *session, c *textproto.Conn) error {
 		return ErrNoGroupSelected
 	}
 	from, to := parseRange(args[0])
-	articles, err := s.backend.GetArticles(s.group, from, to)
+	articles, err := s.backend.GetArticles(s.group, from, to, true)
 	if err != nil {
 		return err
 	}
@@ -94,8 +94,7 @@ func handleList(args []string, s *session, c *textproto.Conn) error {
 	for _, g := range groups {
 		switch ltype {
 		case "active":
-			fmt.Fprintf(dw, "%s %d %d %v\r\n",
-				g.Name, g.High, g.Low, g.Posting)
+			fmt.Fprintf(dw, "%s %d %d %v\r\n", g.Name, g.High, g.Low, g.Posting)
 		case "newsgroups":
 			fmt.Fprintf(dw, "%s %s\r\n", g.Name, g.Description)
 		}
@@ -135,11 +134,11 @@ func handleGroup(args []string, s *session, c *textproto.Conn) error {
 	return nil
 }
 
-func (s *session) getArticle(args []string) (*Article, error) {
+func (s *session) getArticle(args []string, ho bool) (*Article, error) {
 	if s.group == nil {
 		return nil, ErrNoGroupSelected
 	}
-	return s.backend.GetArticle(s.group, args[0])
+	return s.backend.GetArticle(s.group, args[0], ho)
 }
 
 /*
@@ -165,7 +164,7 @@ func (s *session) getArticle(args []string) (*Article, error) {
 */
 
 func handleHead(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, err := s.getArticle(args, true)
 	if err != nil {
 		return err
 	}
@@ -207,7 +206,7 @@ func handleHead(args []string, s *session, c *textproto.Conn) error {
 */
 
 func handleBody(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, err := s.getArticle(args, false)
 	if err != nil {
 		return err
 	}
@@ -247,7 +246,7 @@ func handleBody(args []string, s *session, c *textproto.Conn) error {
 */
 
 func handleArticle(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, err := s.getArticle(args, false)
 	if err != nil {
 		return err
 	}
@@ -308,7 +307,7 @@ func handleIHave(args []string, s *session, c *textproto.Conn) error {
 	}
 
 	// XXX:  See if we have it.
-	article, err := s.backend.GetArticle(nil, args[0])
+	article, err := s.backend.GetArticle(nil, args[0], true)
 	if article != nil {
 		return ErrNotWanted
 	}
