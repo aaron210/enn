@@ -8,6 +8,7 @@ import (
 )
 
 type ArticleRef struct {
+	Index    int
 	RawMsgID [16]byte
 	Offset   int64
 	Length   int64
@@ -38,10 +39,11 @@ func (a *Article) Marshal() []byte {
 }
 
 type BaseGroupInfo struct {
-	Name     string
-	Desc     string
-	Announce string
-	Silence  bool
+	Name        string `json:",omitempty"`
+	Desc        string `json:",omitempty"`
+	Announce    string `json:",omitempty"`
+	Silence     bool   `json:",omitempty"`
+	MaxPostSize int64  `json:",omitempty"`
 }
 
 type ModInfo struct {

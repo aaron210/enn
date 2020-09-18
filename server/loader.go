@@ -18,20 +18,29 @@ func LoadIndex(path string, db *backend.Backend) error {
 	if err != nil {
 		return err
 	}
-	df, err := os.OpenFile(path+".data", os.O_CREATE|os.O_RDWR, 0777)
-	if err != nil {
-		return err
-	}
 
 	db.Groups = map[string]*backend.Group{}
 	db.Articles = map[[16]byte]*common.ArticleRef{}
 	db.Mods = map[string]*common.ModInfo{}
 	db.Index = f
-	db.Data = df
 	db.ServerName = *ServerName
-	db.Init()
+	db.MaxLiveArticels = 1e5
 
-	const maxArticles = 100000
+	df0, err := os.OpenFile(path+".data.0", os.O_CREATE|os.O_RDWR, 0777)
+	if err != nil {
+		return err
+	}
+	db.Data = []*os.File{df0}
+
+	for i := 1; ; i++ {
+		df, err := os.OpenFile(path+".data."+strconv.Itoa(i), os.O_RDWR, 0777)
+		if err != nil {
+			break
+		}
+		db.Data = append(db.Data, df)
+	}
+
+	db.Init()
 
 	rd := bufio.NewReader(f)
 	for ln := 1; ; ln++ {
@@ -64,8 +73,9 @@ func LoadIndex(path string, db *backend.Backend) error {
 				Info: &nnn.Group{
 					Name:        info.Name,
 					Description: info.Desc,
+					MaxPostSize: info.MaxPostSize,
 				},
-				Articles: &common.HighLowSlice{MaxSize: maxArticles},
+				Articles: &common.HighLowSlice{MaxSize: db.MaxLiveArticels},
 			}
 			if info.Silence {
 				gs.Info.Posting = nnn.PostingNotPermitted
@@ -78,17 +88,17 @@ func LoadIndex(path string, db *backend.Backend) error {
 				db.Groups[info.Name] = gs
 			}
 		case 'A':
-			if len(line) < 8 { // Agroup msgid offset length, 8 chars minimal
+			if len(line) < 10 { // format: "Agroup msgid index offset length", 10 chars minimal
 				log.Printf("#%d %q invalid A header\n", ln, line)
 				continue
 			}
 
 			parts := bytes.Split(line[1:], []byte(" "))
-			if len(parts) != 4 {
-				log.Printf("#%d %q invalid A header, space not found\n", ln, line)
+			if len(parts) != 5 {
+				log.Printf("#%d %q invalid A header, need 5 arguments\n", ln, line)
 				continue
 			}
-			group, msgid, offsetbuf, lengthbuf := parts[0], parts[1], parts[2], parts[3]
+			group, msgid, indexbuf, offsetbuf, lengthbuf := parts[0], parts[1], parts[2], parts[3], parts[4]
 
 			g := db.Groups[string(group)]
 			if g == nil {
@@ -96,23 +106,27 @@ func LoadIndex(path string, db *backend.Backend) error {
 				continue
 			}
 
-			offset, err := strconv.ParseInt(string(offsetbuf), 36, 64)
+			ar := &common.ArticleRef{}
+
+			ar.Index, err = strconv.Atoi(string(indexbuf))
+			if err != nil {
+				log.Printf("#%d %q invalid A header, invalid index: %v\n", ln, line, err)
+				continue
+			}
+
+			ar.Offset, err = strconv.ParseInt(string(offsetbuf), 36, 64)
 			if err != nil {
 				log.Printf("#%d %q invalid A header, invalid offset: %v\n", ln, line, err)
 				continue
 			}
 
-			length, err := strconv.ParseInt(string(lengthbuf), 36, 64)
+			ar.Length, err = strconv.ParseInt(string(lengthbuf), 36, 64)
 			if err != nil {
 				log.Printf("#%d %q invalid A header, invalid length: %v\n", ln, line, err)
 				continue
 			}
 
-			ar := &common.ArticleRef{}
 			ar.RawMsgID = common.MsgIDToRawMsgID("", msgid)
-			ar.Offset = offset
-			ar.Length = length
-
 			g.Append(db, ar)
 			db.Articles[ar.RawMsgID] = ar
 		case 'M':
@@ -146,6 +160,10 @@ func LoadIndex(path string, db *backend.Backend) error {
 		g.Info.High = int64(g.Articles.High())
 		g.Info.Low = int64(g.Articles.Low() + 1)
 	}
-	log.Printf("loader: %d groups, %d articles, %d mods", len(db.Groups), len(db.Articles), len(db.Mods))
+
+	log.Println()
+	log.Printf("loader: %d data files, %d groups, %d articles, %d mods",
+		len(db.Data), len(db.Groups), len(db.Articles), len(db.Mods))
+	log.Println()
 	return nil
 }

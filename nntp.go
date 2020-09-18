@@ -43,6 +43,7 @@ type Group struct {
 	High        int64
 	Low         int64
 	Posting     PostingStatus
+	MaxPostSize int64
 }
 
 // An Article that may appear in one or more groups.
@@ -115,6 +116,8 @@ var ErrAuthRejected = &NNTPError{452, "authorization rejected"}
 // ErrNotAuthenticated is returned when a command is issued that requires
 // authentication, but authentication was not provided.
 var ErrNotAuthenticated = &NNTPError{480, "authentication required"}
+
+var ErrServerBad = &NNTPError{500, "Server bad"}
 
 // Handler is a low-level protocol handler
 type Handler func(args []string, s *session, c *textproto.Conn) error

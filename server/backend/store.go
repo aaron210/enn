@@ -36,11 +36,12 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 }
 
 type Backend struct {
-	Groups      map[string]*Group
-	Articles    map[[16]byte]*common.ArticleRef
-	Mods        map[string]*common.ModInfo
-	Index, Data *os.File
-	AuthObject  interface{}
+	Groups     map[string]*Group
+	Articles   map[[16]byte]*common.ArticleRef
+	Mods       map[string]*common.ModInfo
+	Index      *os.File
+	Data       []*os.File
+	AuthObject interface{}
 
 	ServerName      string
 	MaxLiveArticels int
@@ -60,7 +61,7 @@ func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
 	tb.filemu.Lock()
 	defer tb.filemu.Unlock()
 
-	f := tb.Data
+	f := tb.Data[len(tb.Data)-1]
 
 	if _, err := f.Seek(0, 2); err != nil {
 		return nil, err
@@ -89,6 +90,7 @@ func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
 	}
 
 	return &common.ArticleRef{
+		Index:  len(tb.Data) - 1,
 		Offset: offset,
 		Length: int64(n),
 	}, nil
@@ -138,12 +140,29 @@ func (tb *Backend) GetGroup(name string) (*nnn.Group, error) {
 	return group.Info, nil
 }
 
-func (tb *Backend) mkArticle(a *common.ArticleRef) (*nnn.Article, error) {
-	f, err := os.OpenFile(tb.Data.Name(), os.O_RDONLY, 0777)
+func (tb *Backend) mkArticle(a *common.ArticleRef) (A *nnn.Article, E error) {
+	name := tb.Data[a.Index].Name()
+	f, err := os.OpenFile(name, os.O_RDONLY, 0777)
 	if err != nil {
-		return nil, err
+		log.Println("open", name, err)
+		return nil, nnn.ErrServerBad
 	}
-	defer f.Close()
+
+	defer func() {
+		f.Close()
+		if E != nil {
+			log.Println("open", name, E)
+			E = nnn.ErrInvalidArticleNumber
+		}
+	}()
+
+	// Early check
+	var matchLength int64
+	f.Seek(a.Offset-8, 0)
+	binary.Read(f, binary.BigEndian, &matchLength)
+	if matchLength != a.Length {
+		return nil, fmt.Errorf("invalid length marker %d, expect %d", matchLength, a.Length)
+	}
 
 	if _, err := f.Seek(a.Offset, 0); err != nil {
 		return nil, err
@@ -335,7 +354,10 @@ func (tb *Backend) Post(article *nnn.Article) error {
 	tmp := bytes.Buffer{}
 	for _, g := range a.Refer {
 		if g, ok := tb.Groups[g]; ok {
-			tmp.WriteString(fmt.Sprintf("\nA%s %s %s %s", g.Info.Name, msgID,
+			tmp.WriteString(fmt.Sprintf("\nA%s %s %d %s %s",
+				g.Info.Name,
+				msgID,
+				ar.Index,
 				strconv.FormatInt(ar.Offset, 36),
 				strconv.FormatInt(ar.Length, 36)))
 		}
@@ -355,6 +377,11 @@ func (tb *Backend) Post(article *nnn.Article) error {
 			if !ImplIsMod(tb) {
 				continue
 			}
+		}
+
+		if g.Info.MaxPostSize != 0 && n > g.Info.MaxPostSize*4/3 {
+			log.Printf("post: %q large article %v (%d <-> %d)", g.Info.Name, msgID, n, g.Info.MaxPostSize*4/3)
+			continue
 		}
 
 		g.Append(tb, ar)

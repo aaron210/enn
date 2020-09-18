@@ -7,4 +7,5 @@
 .DS_Store
 testdb
 .idea
-testdb.data
+testdb.data.*
+1.png

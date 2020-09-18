@@ -16,14 +16,14 @@ import (
 )
 
 var (
-	DBPath       = flag.String("db", "testdb", "")
-	ServerName   = flag.String("name", "10.94.86.99", "")
-	Listen       = flag.String("l", ":1119 :1563 :8080", "")
-	GroupAdd     = flag.String("group-add", "", "name,desc")
-	GroupSilence = flag.String("group-post", "", "name")
-	ModAdd       = flag.String("mod-add", "", "email,pass")
-	ModDel       = flag.String("mod-del", "", "email")
-	MaxPostSize  = flag.Int64("max-post-size", 1024*1024*3, "")
+	DBPath         = flag.String("db", "testdb", "")
+	ServerName     = flag.String("name", "10.94.86.99", "")
+	Listen         = flag.String("l", ":1119 :1563 :8080", "")
+	GroupAdd       = flag.String("group-create", "", "name,desc")
+	GroupSilence   = flag.String("group-post", "", "name")
+	GroupMaxPostSz = flag.String("group-mps", "", "")
+	ModAdd         = flag.String("mod-add", "", "email,pass")
+	ModDel         = flag.String("mod-del", "", "email")
 )
 
 var db = &backend.Backend{}
@@ -49,7 +49,7 @@ func main() {
 	log.SetFlags(log.Lshortfile | log.Ltime | log.Lmicroseconds | log.Ldate)
 
 	backend.ImplMaxPostSize = func(b *backend.Backend) int64 {
-		return *MaxPostSize
+		return 1024 * 1024 * 3
 	}
 	backend.ImplAuth = func(b *backend.Backend, user, pass string) error {
 		obj, _ := b.AuthObject.(*authObject)
