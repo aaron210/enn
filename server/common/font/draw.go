@@ -1,36 +1,20 @@
 package font
 
 import (
-	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
-	"io/ioutil"
-	"net/http"
-	"os"
-	"path/filepath"
+	"strings"
 
-	"github.com/coyove/nnn/server/common"
+	"github.com/coyove/enn/server/common"
 )
 
 var BasePlane image.Image
 
 func init() {
-	path := filepath.Join(os.TempDir(), "pixii12.png")
-
-	var buf []byte
-	if _, err := os.Stat(path); err != nil {
-		resp, err := http.Get("https://github.com/coyove/Pixii/raw/master/pixii-plane0.png")
-		common.PanicIf(err, "%%err")
-		defer resp.Body.Close()
-		buf, _ = ioutil.ReadAll(resp.Body)
-		common.PanicIf(ioutil.WriteFile(path, buf, 0777), "%%err")
-	} else {
-		buf, _ = ioutil.ReadFile(path)
-	}
-
-	img, err := png.Decode(bytes.NewReader(buf))
+	img, err := png.Decode(base64.NewDecoder(base64.StdEncoding, strings.NewReader(p)))
 	common.PanicIf(err, "%%err")
 	common.PanicIf(img.Bounds().Dx() != 3072, "font: incorrect base plane: %v", img.Bounds())
 

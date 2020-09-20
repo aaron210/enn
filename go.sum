@@ -1,5 +1,3 @@
 github.com/coyove/common v0.0.0-20200714073322-5d32ad16e471 h1:CnNZ/Pio60R73YkIQTOgs4b5xtqWjcvpe/ViiF1FHhA=
 github.com/coyove/common v0.0.0-20200714073322-5d32ad16e471/go.mod h1:BXXdh0GDQudvWCqAUeD5jsBua+GRqs2EiM3Ij34esA4=
-github.com/coyove/nnn v0.0.0-20200920033154-40571b5c56cb h1:3bZS7wjbB7Rm6pNcZSwHCSBzSJc5kenuHnW3OvIQeck=
-github.com/coyove/nnn v0.0.0-20200920033154-40571b5c56cb/go.mod h1:mbqlhB2ahKMVZ8UxFU6G+5j46BzdmjHBomo4CTzyha4=
 github.com/gomodule/redigo v2.0.0+incompatible/go.mod h1:B4C85qUVwatsJoIUNIfCRsp7qO0iAmpGFZ4EELWSbC4=

@@ -61,7 +61,11 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tb.Begin()
-	tb.Write(fmt.Sprintf("%s 运行:%v 更新:%v\nMod:", *ServerName, time.Since(startAt)/1e9*1e9, time.Now().Format("060102150405")))
+	tb.Write(fmt.Sprintf("%s/%s\n运行:%v 更新:%v TLS:%v\nMod:",
+		*ServerName, *Listen,
+		time.Since(startAt)/1e9*1e9, time.Now().Format("060102150405"),
+		x509cert.NotAfter.Format("060102"),
+	))
 
 	for k := range db.Mods {
 		tb.Write(" ")

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coyove/nnn/server/common"
+	"github.com/coyove/enn/server/common"
 )
 
 // PostingStatus type for groups.

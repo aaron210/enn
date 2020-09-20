@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -15,6 +16,7 @@ import (
 )
 
 var (
+	Certbot        = flag.String("certbot", "", "")
 	DBPath         = flag.String("db", "testdb", "")
 	ServerName     = flag.String("name", "10.94.86.99", "")
 	Listen         = flag.String("l", ":1119 :1563 :8080", "")
@@ -27,8 +29,9 @@ var (
 )
 
 var (
-	db      = &backend.Backend{}
-	startAt = time.Now()
+	db       = &backend.Backend{}
+	startAt  = time.Now()
+	x509cert *x509.Certificate
 )
 
 type authObject struct {
@@ -97,8 +100,15 @@ func main() {
 	}
 
 	if tlsBind != "" {
-		cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
-		common.PanicIf(err, "error loading TLS cert: %v", err)
+		if ip := net.ParseIP(*ServerName); *ServerName == "" || *ServerName == "localhost" || len(ip) > 0 {
+			common.L("IP mode, no TLS enabled")
+			goto SKIP_TLS
+		}
+
+		cert, err := tls.LoadX509KeyPair(*Certbot+"/"+*ServerName+"/fullchain.pem", *Certbot+"/"+*ServerName+"/privkey.pem")
+		common.PanicIf(err, "%%err")
+		x509cert, err = x509.ParseCertificate(cert.Certificate[0])
+		common.PanicIf(err, "%%err")
 
 		l, err := tls.Listen("tcp", tlsBind, &tls.Config{Certificates: []tls.Certificate{cert}})
 		common.PanicIf(err, "error setting up TLS listener: %v", err)
@@ -106,6 +116,7 @@ func main() {
 		go handle(l)
 	}
 
+SKIP_TLS:
 	if httpBind != "" {
 		http.HandleFunc("/", HandleGroups)
 		go http.ListenAndServe(httpBind, nil)
