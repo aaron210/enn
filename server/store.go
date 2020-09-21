@@ -1,10 +1,11 @@
-package backend
+package main
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"net/textproto"
 	"os"
 	"strconv"
@@ -46,33 +47,44 @@ type Backend struct {
 	Mods         map[string]*common.ModInfo
 	Index        *os.File
 	Data         []*os.File
-	AuthObject   interface{}
+	AuthObject   *common.AuthObject
 	PostInterval time.Duration
-
-	ServerName string
+	ServerName   string
+	Blacklist    map[string]*net.IPNet
 
 	ipCache *lru.Cache
-	filemu  *sync.Mutex
+	muFile  *sync.Mutex
 	mu      *sync.RWMutex
 }
 
-func (tb *Backend) Init() {
-	tb.mu = new(sync.RWMutex)
-	tb.filemu = new(sync.Mutex)
-	tb.ipCache = lru.NewCache(1e3)
+func (db *Backend) IsMod() bool {
+	if db.AuthObject == nil {
+		return false
+	}
+	mi := db.Mods[db.AuthObject.User]
+	if mi == nil {
+		return false
+	}
+	return mi.Password == db.AuthObject.Pass
+}
 
-	if tb.PostInterval == 0 {
-		tb.PostInterval = time.Minute
+func (db *Backend) Init() {
+	db.mu = new(sync.RWMutex)
+	db.muFile = new(sync.Mutex)
+	db.ipCache = lru.NewCache(1e3)
+
+	if db.PostInterval == 0 {
+		db.PostInterval = time.Minute
 	}
 }
 
-func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
+func (db *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
 	const sep = "\x01\x23\x45\x67\x89\xab\xcd\xef"
 
-	tb.filemu.Lock()
-	defer tb.filemu.Unlock()
+	db.muFile.Lock()
+	defer db.muFile.Unlock()
 
-	f := tb.Data[len(tb.Data)-1]
+	f := db.Data[len(db.Data)-1]
 
 	if _, err := f.Seek(0, 2); err != nil {
 		return nil, err
@@ -101,20 +113,20 @@ func (tb *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
 	}
 
 	return &common.ArticleRef{
-		Index:  len(tb.Data) - 1,
+		Index:  len(db.Data) - 1,
 		Offset: offset,
 		Length: int64(n),
 	}, nil
 }
 
-func (tb *Backend) WriteCommand(buf []byte) error {
-	return tb.writeIndex(buf)
+func (db *Backend) WriteCommand(buf []byte) error {
+	return db.writeIndex(buf)
 }
 
-func (tb *Backend) writeIndex(buf []byte) error {
-	tb.filemu.Lock()
-	defer tb.filemu.Unlock()
-	f := tb.Index
+func (db *Backend) writeIndex(buf []byte) error {
+	db.muFile.Lock()
+	defer db.muFile.Unlock()
+	f := db.Index
 
 	if _, err := f.Seek(0, 2); err != nil {
 		return err
@@ -129,34 +141,34 @@ func (tb *Backend) writeIndex(buf []byte) error {
 	return nil
 }
 
-func (tb *Backend) ListGroups(max int) ([]*enn.Group, error) {
-	tb.mu.RLock()
-	defer tb.mu.RUnlock()
+func (db *Backend) ListGroups(max int) ([]*enn.Group, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 
 	var rv []*enn.Group
-	for _, g := range tb.Groups {
+	for _, g := range db.Groups {
 		rv = append(rv, g.Group)
 	}
 	return rv, nil
 }
 
-func (tb *Backend) GetGroup(name string) (*enn.Group, error) {
-	tb.mu.RLock()
-	defer tb.mu.RUnlock()
+func (db *Backend) GetGroup(name string) (*enn.Group, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 
-	group, ok := tb.Groups[name]
+	group, ok := db.Groups[name]
 	if !ok {
 		return nil, enn.ErrNoSuchGroup
 	}
 	return group.Group, nil
 }
 
-func (tb *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Article, E error) {
-	if a.Index >= len(tb.Data) {
+func (db *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Article, E error) {
+	if a.Index >= len(db.Data) {
 		return nil, enn.ErrInvalidArticleNumber
 	}
 
-	name := tb.Data[a.Index].Name()
+	name := db.Data[a.Index].Name()
 	f, err := os.OpenFile(name, os.O_RDONLY, 0777)
 	if err != nil {
 		common.E("open %q: %v", name, err)
@@ -194,9 +206,7 @@ func (tb *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Arti
 	for k, v := range as.Headers {
 		switch k {
 		case "X-Message-Id":
-			hdr["Message-Id"] = []string{"<" + v[0] + "@" + tb.ServerName + ">", v[0]}
-		case "X-Remote-Ip":
-			// Not viewable from client side
+			hdr["Message-Id"] = []string{"<" + v[0] + "@" + db.ServerName + ">", v[0]}
 		default:
 			hdr[k] = v
 		}
@@ -211,35 +221,35 @@ func (tb *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Arti
 	return na, nil
 }
 
-func (tb *Backend) DeleteArticle(msgid string) error {
-	if err := tb.writeIndex([]byte("\nD" + msgid)); err != nil {
+func (db *Backend) DeleteArticle(msgID string) error {
+	if err := db.writeIndex([]byte("\nD" + msgID)); err != nil {
 		return err
 	}
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	delete(tb.Articles, common.MsgIDToRawMsgID(msgid, nil))
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	delete(db.Articles, common.MsgIDToRawMsgID(msgID, nil))
 	return nil
 }
 
-func (tb *Backend) internalGetGroup(name string) (*Group, bool) {
-	tb.mu.RLock()
-	gs, ok := tb.Groups[name]
-	tb.mu.RUnlock()
+func (db *Backend) internalGetGroup(name string) (*Group, bool) {
+	db.mu.RLock()
+	gs, ok := db.Groups[name]
+	db.mu.RUnlock()
 	return gs, ok
 }
 
-func (tb *Backend) internalGetArticle(id string) (*common.ArticleRef, bool) {
-	tb.mu.RLock()
-	gs, ok := tb.Articles[common.MsgIDToRawMsgID(id, nil)]
-	tb.mu.RUnlock()
+func (db *Backend) internalGetArticle(msgID string) (*common.ArticleRef, bool) {
+	db.mu.RLock()
+	gs, ok := db.Articles[common.MsgIDToRawMsgID(msgID, nil)]
+	db.mu.RUnlock()
 	return gs, ok
 }
 
-func (tb *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Article, error) {
+func (db *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Article, error) {
 	msgID := id
 
 	if intId, err := strconv.ParseInt(id, 10, 64); err == nil {
-		groupStorage, ok := tb.internalGetGroup(group.Name)
+		groupStorage, ok := db.internalGetGroup(group.Name)
 		if !ok {
 			return nil, enn.ErrNoSuchGroup
 		}
@@ -252,32 +262,36 @@ func (tb *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Articl
 		msgID = ar.MsgID()
 	}
 	msgID = common.ExtractMsgID(msgID)
-	a, _ := tb.internalGetArticle(msgID)
+	a, _ := db.internalGetArticle(msgID)
 	if a == nil {
 		return nil, enn.ErrInvalidMessageID
 	}
-	return tb.mkArticle(a, ho)
+	return db.mkArticle(a, ho)
 }
 
-func (tb *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn.NumberedArticle, error) {
-	gs, ok := tb.internalGetGroup(group.Name)
+func (db *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn.NumberedArticle, error) {
+	gs, ok := db.internalGetGroup(group.Name)
 	if !ok {
 		return nil, enn.ErrNoSuchGroup
 	}
 
 	var rv []enn.NumberedArticle
+	var errorNum int
 	refs, start, _ := gs.Articles.Slice(int(from-1), int(to-1)+1, false)
 	for i, v := range refs {
 		if v == nil {
 			continue
 		}
-		a, ok := tb.internalGetArticle(v.MsgID())
+		a, ok := db.internalGetArticle(v.MsgID())
 		if !ok {
 			continue
 		}
-		aa, err := tb.mkArticle(a, ho)
+		aa, err := db.mkArticle(a, ho)
 		if err != nil {
-			common.E("failed to get article %q: %v", v.MsgID(), err)
+			errorNum++
+			if errorNum < 10 {
+				common.E("failed to get article %q: %v", v.MsgID(), err)
+			}
 			continue
 		}
 		rv = append(rv, enn.NumberedArticle{
@@ -289,16 +303,16 @@ func (tb *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn
 	return rv, nil
 }
 
-func (tb *Backend) AllowPost() bool {
+func (db *Backend) AllowPost() bool {
 	return true
 }
 
-func (tb *Backend) Authorized() bool {
-	return ImplAuth(tb, "", "") == nil
-}
+// func (tb *Backend) Authorized() bool {
+// 	return ImplAuth(tb, "", "") == nil
+// }
 
-func (tb *Backend) Authenticate(user, pass string) (enn.Backend, error) {
-	tb2 := *tb
-	err := ImplAuth(&tb2, user, pass)
-	return &tb2, err
+func (db *Backend) Authenticate(user, pass string) (enn.Backend, error) {
+	tb2 := *db
+	tb2.AuthObject = &common.AuthObject{user, pass}
+	return &tb2, nil
 }

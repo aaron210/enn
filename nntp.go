@@ -137,7 +137,7 @@ type Backend interface {
 	GetGroup(name string) (*Group, error)
 	GetArticle(group *Group, id string, headerOnly bool) (*Article, error)
 	GetArticles(group *Group, from, to int64, headerOnly bool) ([]NumberedArticle, error)
-	Authorized() bool
+	// Authorized() bool
 	// Authenticate and optionally swap out the backend for this session.
 	// You may return nil to continue using the same backend.
 	Authenticate(user, pass string) (Backend, error)

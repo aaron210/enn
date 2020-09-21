@@ -11,19 +11,19 @@ import (
 var Verbose = 0
 
 func L(f string, a ...interface{}) {
-	if Verbose >= 0 {
+	if Verbose <= 0 {
 		logger(0, f, a...)
 	}
 }
 
 func E(f string, a ...interface{}) {
-	if Verbose >= 1 {
+	if Verbose <= 1 {
 		logger(1, f, a...)
 	}
 }
 
 func F(f string, a ...interface{}) {
-	if Verbose >= 1 {
+	if Verbose <= 1 {
 		logger(2, f, a...)
 	}
 	os.Exit(2)

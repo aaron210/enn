@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -155,8 +156,11 @@ func FormatSize(v int64) string {
 }
 
 var TranslateEncoding = func() func(string) string {
-	// =?UTF-8?B?....?= TODO: more encodings
-	var r = regexp.MustCompile(`=\?UTF-8\?B\?(\S+)\?=`)
+	// https://tools.ietf.org/html/rfc1342
+	var r = regexp.MustCompile(`(?i)=\?UTF-8\?B\?(\S+)\?=`)
+	var rq = regexp.MustCompile(`(?i)=\?UTF-8\?Q\?(\S+)\?=`)
+	var rq2 = regexp.MustCompile(`(?i)(=[0-9a-f]{2})`)
+
 	return func(in string) string {
 		outs := r.FindAllStringSubmatch(in, -1)
 		if len(outs) == 1 && len(outs[0]) == 2 {
@@ -164,6 +168,13 @@ var TranslateEncoding = func() func(string) string {
 			if err == nil {
 				return string(buf)
 			}
+		}
+		outs = rq.FindAllStringSubmatch(in, -1)
+		if len(outs) == 1 && len(outs[0]) == 2 {
+			return string(rq2.ReplaceAllFunc([]byte(outs[0][1]), func(in []byte) []byte {
+				hex.Decode(in, in[1:])
+				return in[:1]
+			}))
 		}
 		return in
 	}

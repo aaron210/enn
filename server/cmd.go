@@ -2,100 +2,107 @@ package main
 
 import (
 	"bytes"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
-	"strings"
 	"time"
+	"unicode"
 
 	"github.com/coyove/enn/server/common"
 )
 
-func splitCommand(a string, n int) []string {
-	if a == "-" {
-		total := bytes.Buffer{}
-		for {
-			var line string
-			_, err := fmt.Scanf("%s", &line)
-			if err != nil {
-				break
-			}
-			total.WriteString(line)
-			total.WriteString("\n")
-		}
-		a = total.String()
+func askInput(prompt, value interface{}) (string, int64, int) {
+	var in string
+	fmt.Printf("%s (default: %#v): ", prompt, value)
+	fmt.Scanln(&in)
+	if in == "" {
+		in = fmt.Sprint(value)
 	}
-
-	res, _ := csv.NewReader(strings.NewReader(a)).ReadAll()
-	common.PanicIf(len(res) == 0 || len(res[0]) != n, "invalid command: %q (%d)", a, n)
-	return res[0]
+	v, _ := strconv.ParseInt(in, 10, 64)
+	v2, _ := strconv.Atoi(in)
+	return in, v, v2
 }
 
 func HandleCommand() bool {
-	if *ModAdd != "" {
-		x := splitCommand(*ModAdd, 2)
-		common.PanicIf(db.Mods[x[0]] != nil, "mod %q already existed", x[0])
+	if *NopDB != "" {
+		var lines []int
+		var tmp bytes.Buffer
+		var raw = *NopDB + " "
+
+		for raw != "" {
+			if unicode.IsDigit(rune(raw[0])) {
+				tmp.WriteByte(raw[0])
+			} else {
+				line, _ := strconv.Atoi(tmp.String())
+				if line > 0 {
+					lines = append(lines, line)
+				}
+				tmp.Reset()
+			}
+			raw = raw[1:]
+		}
+		common.PanicIf(NopLines(*DBPath, lines...), "%%err")
+		return true
+	}
+
+	if *ModCmd != "" {
+		m := db.Mods[*ModCmd]
+		if m == nil {
+			fmt.Println("Create new mod")
+			m = &common.ModInfo{Email: *ModCmd}
+		} else {
+			fmt.Println("Update mod", *ModCmd)
+		}
+		m.Password, _, _ = askInput("Password", m.Password)
 
 		p := bytes.NewBufferString("\nm")
-		json.NewEncoder(p).Encode(common.ModInfo{
-			Email:    x[0],
-			Password: x[1],
-		})
+		json.NewEncoder(p).Encode(m)
 		common.PanicIf(db.WriteCommand(p.Bytes()), "%%err")
 		return true
 	}
 
-	if *ModDel != "" {
-		x := splitCommand(*ModDel, 1)
-		common.PanicIf(db.Mods[x[0]] == nil, "mod %q not existed", x[0])
-		common.PanicIf(db.WriteCommand([]byte("\nc"+x[0])), "%%err")
-		return true
-	}
-
-	if *GroupAdd != "" {
-		x := splitCommand(*GroupAdd, 2)
-		gs := db.Groups[x[0]]
-		if gs == nil {
-			common.PanicIf(db.WriteCommand(groupInfoAdapter(&common.BaseGroupInfo{
-				Name:       x[0],
-				Desc:       x[1],
-				MaxLives:   1000,
-				CreateTime: time.Now().Unix(),
-			})), "%%err")
+	if *BlacklistCmd != "" {
+		fmt.Println("Existing blacklist")
+		for k, v := range db.Blacklist {
+			fmt.Printf("%q => %v\n", k, v)
+		}
+		name := *BlacklistCmd
+		b := db.Blacklist[name]
+		if b == nil {
+			fmt.Println("Add blacklist", name)
+			cc, _, _ := askInput("Enter range (CIDR format)", "")
+			_, ipnet, err := net.ParseCIDR(cc)
+			common.PanicIf(err, "%%err")
+			common.PanicIf(db.WriteCommand([]byte("\nB"+name+" "+ipnet.String())), "%%err")
 		} else {
-			gs.BaseInfo.Name = x[0]
-			gs.BaseInfo.Desc = x[1]
-			common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
+			fmt.Println("Remove blacklist", name)
+			common.PanicIf(db.WriteCommand([]byte("\nb"+name)), "%%err")
 		}
 		return true
 	}
 
-	if *GroupMaxLives != "" {
-		x := splitCommand(*GroupMaxLives, 2)
-		gs := db.Groups[x[0]]
-		common.PanicIf(gs == nil, "group %q not existed", x[0])
-		gs.BaseInfo.MaxLives, _ = strconv.ParseInt(x[1], 10, 64)
-		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
-		return true
-	}
-
-	if *GroupMaxPostSz != "" {
-		x := splitCommand(*GroupMaxPostSz, 2)
-		gs := db.Groups[x[0]]
-		common.PanicIf(gs == nil, "group %q not existed", x[0])
-		x[1] = strings.Replace(strings.ToLower(x[1]), "k", "000", -1)
-		x[1] = strings.Replace(strings.ToLower(x[1]), "m", "000000", -1)
-		gs.BaseInfo.MaxPostSize, _ = strconv.ParseInt(x[1], 10, 64)
-		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
-		return true
-	}
-
-	if *GroupSilence != "" {
-		x := splitCommand(*GroupSilence, 2)
-		gs := db.Groups[x[0]]
-		common.PanicIf(gs == nil, "group %q not existed", x[0])
-		gs.BaseInfo.Posting = x[1][0]
+	if *GroupCmd != "" {
+		gs := db.Groups[*GroupCmd]
+		if gs == nil {
+			fmt.Println("Create new group")
+			gs = &Group{
+				BaseInfo: &common.BaseGroupInfo{
+					Name:        *GroupCmd,
+					Desc:        "",
+					Posting:     'y',
+					MaxLives:    1000,
+					MaxPostSize: 0,
+					CreateTime:  time.Now().Unix(),
+				},
+			}
+		} else {
+			fmt.Println("Update group", *GroupCmd)
+		}
+		gs.BaseInfo.Desc, _, _ = askInput("Description", gs.BaseInfo.Desc)
+		_, gs.BaseInfo.MaxLives, _ = askInput("Max live articles", gs.BaseInfo.MaxLives)
+		_, gs.BaseInfo.MaxPostSize, _ = askInput("Max post size (0 means using global setting)", gs.BaseInfo.MaxPostSize)
+		_, _, gs.BaseInfo.Posting = askInput("Posting (0: unlimited, 1: disbaled)", gs.BaseInfo.Posting)
 		common.PanicIf(db.WriteCommand(groupInfoAdapter(gs.BaseInfo)), "%%err")
 		return true
 	}

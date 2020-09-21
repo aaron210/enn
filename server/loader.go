@@ -4,23 +4,25 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/coyove/enn"
-	"github.com/coyove/enn/server/backend"
 	"github.com/coyove/enn/server/common"
 )
 
-func LoadIndex(path string, db *backend.Backend) error {
+func LoadIndex(path string, db *Backend) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0777)
 	if err != nil {
 		return err
 	}
 
-	db.Groups = map[string]*backend.Group{}
+	db.Groups = map[string]*Group{}
 	db.Articles = map[[16]byte]*common.ArticleRef{}
 	db.Mods = map[string]*common.ModInfo{}
+	db.Blacklist = map[string]*net.IPNet{}
 	db.Index = f
 	db.ServerName = *ServerName
 
@@ -53,6 +55,7 @@ func LoadIndex(path string, db *backend.Backend) error {
 		}
 
 		switch line[0] {
+		case ' ': // nop
 		case 'G':
 			if len(line) < 3 {
 				common.E("#%d %q invalid G header", ln, line)
@@ -67,13 +70,11 @@ func LoadIndex(path string, db *backend.Backend) error {
 				common.E("#%d %q invalid G header, empty group name", ln, line)
 				continue
 			}
-			gs := &backend.Group{
+			gs := &Group{
 				Group: &enn.Group{
 					Name:        baseInfo.Name,
 					Description: baseInfo.Desc,
-					Posting:     enn.PostingStatus(baseInfo.Posting),
 				},
-				BaseInfo: baseInfo,
 				Articles: &common.HighLowSlice{
 					MaxSize: int(baseInfo.MaxLives),
 
@@ -82,6 +83,18 @@ func LoadIndex(path string, db *backend.Backend) error {
 					// it will be false again
 					NoPurgeNotify: true,
 				},
+				BaseInfo: baseInfo,
+			}
+			switch baseInfo.Posting {
+			case 0:
+				gs.Group.Posting = enn.PostingPermitted
+			case 1:
+				gs.Group.Posting = enn.PostingNotPermitted
+			case 2:
+				gs.Group.Posting = enn.PostingModerated
+			default:
+				common.E("#%d %q invalid G header, invalid posting status", ln, line)
+				continue
 			}
 			if old := db.Groups[baseInfo.Name]; old != nil {
 				common.L("#%d update group: %s => %s", ln, baseInfo.Name, baseInfo.Diff(old.BaseInfo))
@@ -148,6 +161,24 @@ func LoadIndex(path string, db *backend.Backend) error {
 		case 'c':
 			common.L("#%d remove mod info: %q", ln, line[1:])
 			delete(db.Mods, string(line[1:]))
+		case 'B':
+			parts := bytes.Split(line[1:], []byte(" "))
+			if len(parts) != 2 {
+				common.E("#%d %q invalid B header, need 2 arguments", ln, line)
+				continue
+			}
+			name, ipnetbuf := string(parts[0]), string(parts[1])
+			_, ipnet, err := net.ParseCIDR(ipnetbuf)
+			if err != nil {
+				common.E("#%d %q invalid B header, invalid CIDR: %v", ln, line, err)
+				continue
+			}
+			common.L("#%d add to blacklist: %q => %v", ln, name, ipnet)
+			db.Blacklist[name] = ipnet
+		case 'b':
+			name := string(line[1:])
+			common.L("#%d delete from blacklist: %q", ln, name)
+			delete(db.Blacklist, name)
 		}
 	}
 
@@ -159,7 +190,51 @@ func LoadIndex(path string, db *backend.Backend) error {
 		g.Articles.NoPurgeNotify = false
 	}
 
-	common.L("loader: %d data files, %d groups, %d articles, %d mods",
-		len(db.Data), len(db.Groups), len(db.Articles), len(db.Mods))
+	common.L("loader: %d data files, %d groups, %d articles, %d mods, %d blocks",
+		len(db.Data), len(db.Groups), len(db.Articles), len(db.Mods), len(db.Blacklist))
+	return nil
+}
+
+// NopLines search the database and 'nop' the given lines so they will be omitted in any future loadings
+func NopLines(path string, lines ...int) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0777)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	sort.Ints(lines)
+
+	tmp := [1]byte{}
+	rd := bufio.NewReader(f)
+	read := 0
+	ln := 1
+	lineStartOffset := map[int]int{}
+
+	for len(lines) > 0 {
+		if ln == lines[0] {
+			lineStartOffset[ln] = read
+			lines = lines[1:]
+		}
+
+		n, _ := rd.Read(tmp[:])
+		if n == 0 {
+			break
+		}
+
+		read++
+		if tmp[0] == '\n' {
+			ln++
+		}
+	}
+
+	for _, pos := range lineStartOffset {
+		if _, err := f.Seek(int64(pos), 0); err != nil {
+			return err
+		}
+		if _, err := f.WriteString(" "); err != nil {
+			return err
+		}
+	}
 	return nil
 }

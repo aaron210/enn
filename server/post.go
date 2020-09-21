@@ -1,10 +1,11 @@
-package backend
+package main
 
 import (
 	"bytes"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -14,25 +15,25 @@ import (
 	"github.com/coyove/enn/server/common"
 )
 
-func (tb *Backend) Post(article *enn.Article) error {
+func (db *Backend) Post(article *enn.Article) error {
 	// log.Printf("post: %#v", article.Header)
 
 	// Check special subject 'd' issued by mods, which can delete the refered article
 	subject := article.Header.Get("Subject")
 	switch strings.TrimSpace(subject) {
 	case "d":
-		if tb.AuthObject == nil {
+		if db.AuthObject == nil {
 			return enn.ErrNotAuthenticated
 		}
-		if !ImplIsMod(tb) {
+		if !db.IsMod() {
 			return enn.ErrNotMod
 		}
 		refer := article.Header.Get("References")
 		if refer == "" {
 			return &enn.NNTPError{Code: 441, Msg: "Please refer an article"}
 		}
-		common.L("delete article %q, auth: %#v", refer, tb.AuthObject)
-		return tb.DeleteArticle(common.ExtractMsgID(refer))
+		common.L("delete article %q, auth: %#v", refer, db.AuthObject)
+		return db.DeleteArticle(common.ExtractMsgID(refer))
 	}
 
 	// Check subject length
@@ -50,30 +51,41 @@ func (tb *Backend) Post(article *enn.Article) error {
 	// Check sender address, no mod spoof
 	email := common.ExtractEmail(article.Header.Get("From"))
 	isMod := false
-	if tb.Mods[email] != nil {
-		if tb.AuthObject == nil {
+	if db.Mods[email] != nil {
+		if db.AuthObject == nil {
 			return enn.ErrNotAuthenticated
 		}
-		if !ImplIsMod(tb) {
+		if !db.IsMod() {
 			return enn.ErrNotMod
 		}
 		isMod = true
 	}
 
 	// Check IP throt
+	tcpaddr, ok := article.RemoteAddr.(*net.TCPAddr)
+	if !ok {
+		common.E("post: invalid remote IP: %v", article.RemoteAddr)
+		return enn.ErrPostingFailed
+	}
+
 	if !isMod {
-		ip := article.RemoteAddr.String()
-		v, ok := tb.ipCache.Get(ip)
+		if db.IsBanned(tcpaddr.IP) {
+			common.E("post: banned remote IP: %v", article.RemoteAddr)
+			return enn.ErrPostingFailed
+		}
+
+		ip := tcpaddr.IP.String()
+		v, ok := db.ipCache.Get(ip)
 		if ok {
-			if diff := time.Since(v.(time.Time)); diff < tb.PostInterval {
-				return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post cooldown (wait %v)", tb.PostInterval-diff)}
+			if diff := time.Since(v.(time.Time)); diff < db.PostInterval {
+				return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post cooldown (wait %v)", db.PostInterval-diff)}
 			}
 		}
-		tb.ipCache.Add(ip, time.Now())
+		db.ipCache.Add(ip, time.Now())
 	}
 
 	// Read the body, check global max posting size limitation
-	mps := ImplMaxPostSize(tb)
+	mps := *MaxPostSize
 	buf := &bytes.Buffer{}
 	n, err := io.Copy(buf, io.LimitReader(article.Body, mps))
 	if err != nil {
@@ -87,7 +99,7 @@ func (tb *Backend) Post(article *enn.Article) error {
 	var msgID string
 	if msgid := article.Header["Message-Id"]; len(msgid) > 0 {
 		msgID = common.ExtractMsgID(msgid[0])
-		common.L("post: predefined msgid:", msgID)
+		common.L("post: predefined msgid %s", msgID)
 		delete(article.Header, "Message-Id")
 	} else {
 		msgID = strconv.FormatInt(time.Now().Unix(), 36) + strconv.FormatUint(uint64(rand.Uint32()), 36)
@@ -95,7 +107,7 @@ func (tb *Backend) Post(article *enn.Article) error {
 
 	// Fill in custom headers
 	article.Header["X-Message-Id"] = []string{msgID}
-	article.Header["X-Remote-Ip"] = []string{fmt.Sprint(article.RemoteAddr)}
+	article.Header["X-Remote-Ip"] = []string{tcpaddr.IP.String()}
 	article.Header["X-Lines"] = []string{fmt.Sprint(bytes.Count(buf.Bytes(), []byte("\n")))}
 	article.Header["X-Length"] = []string{fmt.Sprint(buf.Len())}
 
@@ -120,12 +132,12 @@ func (tb *Backend) Post(article *enn.Article) error {
 	}
 
 	// If Message-Id has been used, then return error
-	if _, ok := tb.Articles[common.MsgIDToRawMsgID(msgID, nil)]; ok {
+	if _, ok := db.Articles[common.MsgIDToRawMsgID(msgID, nil)]; ok {
 		return enn.ErrPostingFailed
 	}
 
 	// Write header+body to disk
-	ar, err := tb.writeData(a.Marshal())
+	ar, err := db.writeData(a.Marshal())
 	if err != nil {
 		return err
 	}
@@ -135,13 +147,13 @@ func (tb *Backend) Post(article *enn.Article) error {
 	var postSuccess int
 	var lastError = enn.ErrPostingFailed
 	for _, g := range a.Refer {
-		g, ok := tb.Groups[g]
+		g, ok := db.Groups[g]
 		if !ok {
 			continue
 		}
 
 		if g.Group.Posting == enn.PostingNotPermitted {
-			if !ImplIsMod(tb) {
+			if !db.IsMod() {
 				continue
 			}
 		}
@@ -152,7 +164,7 @@ func (tb *Backend) Post(article *enn.Article) error {
 			continue
 		}
 
-		if err := tb.writeIndex([]byte(fmt.Sprintf("\nA%s %s %d %s %s",
+		if err := db.writeIndex([]byte(fmt.Sprintf("\nA%s %s %d %s %s",
 			g.Group.Name,
 			msgID,
 			ar.Index,
@@ -162,7 +174,7 @@ func (tb *Backend) Post(article *enn.Article) error {
 			continue
 		}
 
-		g.Append(tb, ar)
+		g.Append(db, ar)
 		g.Group.Low = int64(g.Articles.Low() + 1)
 		g.Group.High = int64(g.Articles.High()+1) - 1
 		g.Group.Count = int64(g.Articles.Len())
@@ -172,9 +184,18 @@ func (tb *Backend) Post(article *enn.Article) error {
 	}
 
 	if postSuccess > 0 {
-		tb.Articles[common.MsgIDToRawMsgID(msgID, nil)] = ar
+		db.Articles[common.MsgIDToRawMsgID(msgID, nil)] = ar
 	} else {
 		return lastError
 	}
 	return nil
+}
+
+func (db *Backend) IsBanned(ip net.IP) bool {
+	for _, i := range db.Blacklist {
+		if i.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

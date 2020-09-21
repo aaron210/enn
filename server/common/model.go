@@ -59,8 +59,7 @@ func (a *Article) Marshal() []byte {
 type BaseGroupInfo struct {
 	Name        string `json:",omitempty"`
 	Desc        string `json:",omitempty"`
-	Announce    string `json:",omitempty"`
-	Posting     byte   `json:",omitempty"`
+	Posting     int    `json:",omitempty"`
 	MaxPostSize int64  `json:",omitempty"`
 	MaxLives    int64  `json:",omitempty"`
 	CreateTime  int64  `json:",omitempty"`
@@ -72,9 +71,6 @@ func (g BaseGroupInfo) Diff(g2 *BaseGroupInfo) string {
 	}
 	if g.Desc == g2.Desc {
 		g.Desc = ""
-	}
-	if g.Announce == g2.Announce {
-		g.Announce = ""
 	}
 	if g.Posting == g2.Posting {
 		g.Posting = 0
@@ -101,3 +97,8 @@ func (m *ModInfo) String() string {
 	buf, _ := json.Marshal(m)
 	return string(buf)
 }
+
+type AuthObject struct {
+	User, Pass string
+}
+

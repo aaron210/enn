@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"math/rand"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,7 +17,33 @@ import (
 	"github.com/coyove/enn/server/common/font"
 )
 
-func HandleGroups(w http.ResponseWriter, r *http.Request) {
+var HandleGroups = func() func(w http.ResponseWriter, r *http.Request) {
+	var lastBuffer []byte
+	var interval = time.Second * 2
+
+	go func() {
+		for {
+			time.Sleep(interval + time.Duration(rand.Intn(500))*time.Millisecond)
+			lastBuffer = generateStatus()
+		}
+	}()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "image/png")
+		w.Header().Add("Cache-Control", "max-age="+strconv.Itoa(int(interval/time.Second)))
+		w.Write(lastBuffer)
+	}
+}()
+
+func getListenPort(addr string) int {
+	a, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return 0
+	}
+	return a.Port
+}
+
+func generateStatus() []byte {
 	const timeFormat = "2006-01-02 15:04"
 
 	groups, _ := db.ListGroups(0)
@@ -38,6 +67,7 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 		a, _ := db.GetArticle(g, strconv.FormatInt(g.High, 10), true)
 		if a != nil {
 			payload[i].LastArticleTime = a.Header.Get("Date")
+
 			sub := a.Header.Get("Subject")
 			sub = common.TranslateEncoding(sub)
 			payload[i].LastArticleSub = sub
@@ -45,6 +75,9 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 			t, err := dateparse.ParseAny(payload[i].LastArticleTime)
 			if err == nil {
 				payload[i].LastArticleTime = t.Format(timeFormat)
+			}
+			if tmp := payload[i].LastArticleTime; len(tmp) > len(timeFormat) {
+				payload[i].LastArticleTime = tmp[:len(timeFormat)]
 			}
 		}
 	}
@@ -54,18 +87,30 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 	})
 
 	tb := font.Textbox{
-		Width:     500,
+		Width:     600,
 		Margin:    10,
 		LineSpace: 4,
 		CharSpace: 1,
 	}
 
 	tb.Begin()
-	tb.Write(fmt.Sprintf("%s/%s\n运行:%v 更新:%v TLS:%v\nMod:",
-		*ServerName, *Listen,
-		time.Since(startAt)/1e9*1e9, time.Now().Format("060102150405"),
-		x509cert.NotAfter.Format("060102"),
-	))
+	tb.Underline = true
+	tb.Write("桌面客户端：").Wgreen("Thunderbird").
+		Write("，iOS：").Wgreen("Newsy").
+		Write("，Android：").Wgreen("net.piaohong.newsgroup").
+		Write("\n\n")
+	tb.Underline = false
+
+	tb.Write("服务器:").Wu(*ServerName).
+		Write(" 端口:").Wu(strconv.Itoa(getListenPort(plainBind))).
+		Write(" SSL/TLS端口:").Wu(strconv.Itoa(getListenPort(tlsBind))).
+		Write(" 编码:").Wu("UTF-8").
+		Write("\n\n").
+		Write(fmt.Sprintf("运行:%v 更新:%v 证书:%v\nMod:",
+			time.Since(startAt)/1e9*1e9,
+			time.Now().Format(timeFormat),
+			x509cert.NotAfter.Format(timeFormat),
+		))
 
 	for k := range db.Mods {
 		tb.Write(" ")
@@ -78,25 +123,18 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 		if g.LastArticleTime != "" {
 			tb.Write(g.LastArticleTime)
 		} else {
-			tb.Strikeline = true
-			tb.Write(strings.Repeat(" ", len(timeFormat)))
-			tb.Strikeline = false
+			tb.Ws(strings.Repeat(" ", len(timeFormat)))
 		}
 		tb.Gray = false
 
 		tb.Write("  ")
 		tb.Strikeline = g.Group.Posting == enn.PostingNotPermitted
-		tb.Bold = true
-		tb.Write(g.BaseGroupInfo.Name)
+		tb.Wb(g.BaseGroupInfo.Name)
 		tb.Strikeline = false
-		tb.Bold = false
 		tb.Write("  ")
 
-		tb.Write(strconv.FormatInt(g.Group.Count, 10))
-		tb.Write("篇 ")
-		tb.Gray = true
-		tb.Write(fmt.Sprintf("-%d(%d) ", g.Low, g.MaxLives))
-		tb.Gray = false
+		tb.Write(strconv.FormatInt(g.Group.Count, 10)).Write("篇 ")
+		tb.Wgray(fmt.Sprintf("-%d(%d) ", g.Low, g.MaxLives))
 
 		if g.MaxPostSize != 0 {
 			tb.Underline = true
@@ -108,25 +146,22 @@ func HandleGroups(w http.ResponseWriter, r *http.Request) {
 		tb.Write("\n")
 
 		if g.LastArticleSub != "" {
-			tb.Green = true
 			tb.Indent = len(timeFormat) + 2
-			tb.Write("最新: " + g.LastArticleSub)
-			tb.Green = false
+			tb.Wgreen("最新: " + g.LastArticleSub)
 			tb.Indent = 0
 			tb.Write("\n")
 		}
 
 		if g.Description != "" {
-			tb.Blue = true
 			tb.Indent = len(timeFormat) + 2
-			tb.Write(g.Description)
-			tb.Blue = false
+			tb.Wblue(g.Description)
 			tb.Indent = 0
 			tb.Write("\n")
 		}
 
 	}
 
-	w.Header().Add("Content-Type", "image/png")
+	w := &bytes.Buffer{}
 	tb.End(w)
+	return w.Bytes()
 }

@@ -70,7 +70,49 @@ func (tb *Textbox) ensureHeight() {
 	}
 }
 
-func (tb *Textbox) Write(text string) {
+func (tb *Textbox) Wu(text string) *Textbox {
+	tb.Underline = true
+	tb.Write(text)
+	tb.Underline = false
+	return tb
+}
+func (tb *Textbox) Wb(text string) *Textbox {
+	tb.Bold = true
+	tb.Write(text)
+	tb.Bold = false
+	return tb
+}
+func (tb *Textbox) Ws(text string) *Textbox {
+	tb.Strikeline = true
+	tb.Write(text)
+	tb.Strikeline = false
+	return tb
+}
+func (tb *Textbox) Wgray(text string) *Textbox {
+	tb.Gray = true
+	tb.Write(text)
+	tb.Gray = false
+	return tb
+}
+func (tb *Textbox) Wred(text string) *Textbox {
+	tb.Red = true
+	tb.Write(text)
+	tb.Red = false
+	return tb
+}
+func (tb *Textbox) Wgreen(text string) *Textbox {
+	tb.Green = true
+	tb.Write(text)
+	tb.Green = false
+	return tb
+}
+func (tb *Textbox) Wblue(text string) *Textbox {
+	tb.Blue = true
+	tb.Write(text)
+	tb.Blue = false
+	return tb
+}
+func (tb *Textbox) Write(text string) *Textbox {
 	for _, r := range text {
 		if tb.x > tb.rightmost {
 			tb.x = tb.Margin + tb.Indent*tb.dx
@@ -142,6 +184,8 @@ func (tb *Textbox) Write(text string) {
 			}
 		}
 	}
+
+	return tb
 }
 
 func (tb *Textbox) End(w io.Writer) error {

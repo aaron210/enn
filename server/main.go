@@ -8,65 +8,35 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/coyove/enn"
-	"github.com/coyove/enn/server/backend"
 	"github.com/coyove/enn/server/common"
 )
 
 var (
-	Certbot        = flag.String("certbot", "", "")
-	DBPath         = flag.String("db", "testdb", "")
-	ServerName     = flag.String("name", "10.94.86.99", "")
-	Listen         = flag.String("l", ":1119 :1563 :8080", "")
-	GroupAdd       = flag.String("group-create", "", "name,desc")
-	GroupSilence   = flag.String("group-post", "", "name")
-	GroupMaxPostSz = flag.String("group-mps", "", "")
-	GroupMaxLives  = flag.String("group-lives", "", "")
-	ModAdd         = flag.String("mod-add", "", "email,pass")
-	ModDel         = flag.String("mod-del", "", "email")
+	Certbot      = flag.String("certbot", "", "")
+	DBPath       = flag.String("db", "testdb", "")
+	NopDB        = flag.String("nop", "", "")
+	ServerName   = flag.String("name", "10.94.86.99", "Server name")
+	Listen       = flag.String("l", ":1119 :1563 :8080", "listen addresses")
+	MaxPostSize  = flag.Int64("max-post-size", 1024*1024*3, "Global max post size (bytes)")
+	GroupCmd     = flag.String("group", "", "")
+	ModCmd       = flag.String("mod", "", "")
+	BlacklistCmd = flag.String("blacklist", "", "")
 )
 
 var (
-	db       = &backend.Backend{}
-	startAt  = time.Now()
-	x509cert *x509.Certificate
+	db                           = &Backend{}
+	startAt                      = time.Now()
+	x509cert                     x509.Certificate
+	plainBind, tlsBind, httpBind string
 )
-
-type authObject struct {
-	user, pass string
-}
-
-func (obj *authObject) isMod(db *backend.Backend) bool {
-	if obj == nil {
-		return false
-	}
-	mi := db.Mods[obj.user]
-	if mi == nil {
-		return false
-	}
-	return mi.Password == obj.pass
-}
 
 func main() {
 	rand.Seed(time.Now().Unix())
 	flag.Parse()
-
-	backend.ImplMaxPostSize = func(b *backend.Backend) int64 {
-		return 1024 * 1024 * 3
-	}
-	backend.ImplAuth = func(b *backend.Backend, user, pass string) error {
-		obj, _ := b.AuthObject.(*authObject)
-		if obj == nil && user != "" && pass != "" {
-			b.AuthObject = &authObject{user, pass}
-		}
-		return nil
-	}
-	backend.ImplIsMod = func(b *backend.Backend) bool {
-		obj, _ := b.AuthObject.(*authObject)
-		return obj.isMod(db)
-	}
 
 	common.PanicIf(LoadIndex(*DBPath, db), "load data source %v: %%err", *DBPath)
 
@@ -80,13 +50,24 @@ func main() {
 			c, err := l.Accept()
 			if err != nil {
 				common.E("handle: %v", err)
-				return
+				continue
+			}
+
+			tcpaddr, ok := c.RemoteAddr().(*net.TCPAddr)
+			if !ok {
+				c.Close()
+				common.E("handle addr: %v", c.RemoteAddr())
+				continue
+			}
+			if db.IsBanned(tcpaddr.IP) {
+				c.Close()
+				common.E("handle banned IP: %v", c.RemoteAddr())
+				continue
 			}
 			go s.Process(c)
 		}
 	}
 
-	var plainBind, tlsBind, httpBind string
 	fmt.Sscanf(*Listen, "%s %s %s", &plainBind, &tlsBind, &httpBind)
 	common.L("bind: plain=%q, tls=%q, http=%q", plainBind, tlsBind, httpBind)
 
@@ -101,14 +82,19 @@ func main() {
 
 	if tlsBind != "" {
 		if ip := net.ParseIP(*ServerName); *ServerName == "" || *ServerName == "localhost" || len(ip) > 0 {
-			common.L("IP mode, no TLS enabled")
+			common.L("invalid server name, TLS disabled")
 			goto SKIP_TLS
 		}
 
-		cert, err := tls.LoadX509KeyPair(*Certbot+"/"+*ServerName+"/fullchain.pem", *Certbot+"/"+*ServerName+"/privkey.pem")
+		dir := filepath.Join(*Certbot, *ServerName)
+		common.L("load cert in %s", dir)
+
+		cert, err := tls.LoadX509KeyPair(dir+"/fullchain.pem", dir+"/privkey.pem")
 		common.PanicIf(err, "%%err")
-		x509cert, err = x509.ParseCertificate(cert.Certificate[0])
+
+		xc, err := x509.ParseCertificate(cert.Certificate[0])
 		common.PanicIf(err, "%%err")
+		x509cert = *xc
 
 		l, err := tls.Listen("tcp", tlsBind, &tls.Config{Certificates: []tls.Certificate{cert}})
 		common.PanicIf(err, "error setting up TLS listener: %v", err)
@@ -118,7 +104,8 @@ func main() {
 
 SKIP_TLS:
 	if httpBind != "" {
-		http.HandleFunc("/", HandleGroups)
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
+		http.HandleFunc("/status.png", HandleGroups)
 		go http.ListenAndServe(httpBind, nil)
 	}
 
