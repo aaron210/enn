@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/coyove/common/lru"
 	"github.com/coyove/enn"
@@ -18,20 +17,23 @@ import (
 )
 
 type Group struct {
-	Group    *enn.Group
-	BaseInfo *common.BaseGroupInfo
-	Articles *common.HighLowSlice
+	Group         *enn.Group
+	BaseInfo      *common.BaseGroupInfo
+	Articles      *common.HighLowSlice
+	NoPurgeNotify bool
 }
 
 func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 	purged, _ := g.Articles.Append(ar)
 
 	if len(purged) > 0 {
-		tmp := bytes.Buffer{}
-		for _, p := range purged {
-			tmp.WriteString(fmt.Sprintf("\nD%s", p.MsgID()))
+		if !g.NoPurgeNotify {
+			tmp := bytes.Buffer{}
+			for _, p := range purged {
+				tmp.WriteString(fmt.Sprintf("\nD%s", p.MsgID()))
+			}
+			common.D("purge in append: %v, len: %d", b.writeIndex(tmp.Bytes()), len(purged))
 		}
-		common.L("purge in append: %v, len: %d", b.writeIndex(tmp.Bytes()), len(purged))
 
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -42,15 +44,18 @@ func (g *Group) Append(b *Backend, ar *common.ArticleRef) {
 }
 
 type Backend struct {
-	Groups       map[string]*Group
-	Articles     map[[16]byte]*common.ArticleRef
-	Mods         map[string]*common.ModInfo
-	Index        *os.File
-	Data         []*os.File
-	AuthObject   *common.AuthObject
-	PostInterval time.Duration
-	ServerName   string
-	Blacklist    map[string]*net.IPNet
+	Config     common.Config
+	ServerName string
+
+	Groups    map[string]*Group
+	Articles  map[[16]byte]*common.ArticleRef
+	Mods      map[string]*common.ModInfo
+	Blacklist map[string]*net.IPNet
+
+	Index *os.File
+	Data  []*os.File
+
+	AuthObject *common.AuthObject
 
 	ipCache *lru.Cache
 	muFile  *sync.Mutex
@@ -66,16 +71,6 @@ func (db *Backend) IsMod() bool {
 		return false
 	}
 	return mi.Password == db.AuthObject.Pass
-}
-
-func (db *Backend) Init() {
-	db.mu = new(sync.RWMutex)
-	db.muFile = new(sync.Mutex)
-	db.ipCache = lru.NewCache(1e3)
-
-	if db.PostInterval == 0 {
-		db.PostInterval = time.Minute
-	}
 }
 
 func (db *Backend) writeData(buf []byte) (*common.ArticleRef, error) {
@@ -163,7 +158,7 @@ func (db *Backend) GetGroup(name string) (*enn.Group, error) {
 	return group.Group, nil
 }
 
-func (db *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Article, E error) {
+func (db *Backend) mkArticle(a *common.ArticleRef, headerOnly bool, errors *[]error) (A *enn.Article, E error) {
 	if a.Index >= len(db.Data) {
 		return nil, enn.ErrInvalidArticleNumber
 	}
@@ -178,7 +173,11 @@ func (db *Backend) mkArticle(a *common.ArticleRef, headerOnly bool) (A *enn.Arti
 	defer func() {
 		f.Close()
 		if E != nil {
-			common.E("open %q: %v", name, E)
+			if errors != nil {
+				*errors = append(*errors, fmt.Errorf("load data %v: %v", a.MsgID(), E))
+			} else {
+				common.E("load data %v: %v", a, E)
+			}
 			E = enn.ErrInvalidArticleNumber
 		}
 	}()
@@ -256,7 +255,7 @@ func (db *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Articl
 
 		ar, _ := groupStorage.Articles.Get(int(intId - 1))
 		if ar == nil {
-			common.E("get article %q in %q not found ", id, group)
+			common.E("get article %q in %v not found ", id, group)
 			return nil, enn.ErrInvalidArticleNumber
 		}
 		msgID = ar.MsgID()
@@ -266,7 +265,7 @@ func (db *Backend) GetArticle(group *enn.Group, id string, ho bool) (*enn.Articl
 	if a == nil {
 		return nil, enn.ErrInvalidMessageID
 	}
-	return db.mkArticle(a, ho)
+	return db.mkArticle(a, ho, nil)
 }
 
 func (db *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn.NumberedArticle, error) {
@@ -276,7 +275,7 @@ func (db *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn
 	}
 
 	var rv []enn.NumberedArticle
-	var errorNum int
+	var errors []error
 	refs, start, _ := gs.Articles.Slice(int(from-1), int(to-1)+1, false)
 	for i, v := range refs {
 		if v == nil {
@@ -286,18 +285,21 @@ func (db *Backend) GetArticles(group *enn.Group, from, to int64, ho bool) ([]enn
 		if !ok {
 			continue
 		}
-		aa, err := db.mkArticle(a, ho)
+		aa, err := db.mkArticle(a, ho, &errors)
 		if err != nil {
-			errorNum++
-			if errorNum < 10 {
-				common.E("failed to get article %q: %v", v.MsgID(), err)
-			}
 			continue
 		}
 		rv = append(rv, enn.NumberedArticle{
 			Num:     int64(i+start) + 1,
 			Article: aa,
 		})
+	}
+
+	if len(errors) > 0 {
+		if len(errors) > 10 {
+			errors = append(errors[:5], errors[len(errors)-5:]...)
+		}
+		common.E("get articles, multiple errors: %v", errors)
 	}
 
 	return rv, nil

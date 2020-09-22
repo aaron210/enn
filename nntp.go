@@ -176,6 +176,7 @@ func NewServer(backend Backend) *Server {
 		ThrotCmdWindow:   time.Second * 5,
 	}
 	rv.Handlers["quit"] = handleQuit
+	rv.Handlers["date"] = handleDate
 	rv.Handlers["group"] = handleGroup
 	rv.Handlers["list"] = handleList
 	rv.Handlers["head"] = handleHead
@@ -251,7 +252,7 @@ func (s *Server) Process(nc net.Conn) {
 		} else {
 			wait := sess.throtTimer.Add(-s.ThrotCmdWindow).Sub(now)
 			if wait > time.Millisecond*250 {
-				common.L("%v: throt wait %v", nc.RemoteAddr(), wait)
+				common.D("%v: throt wait %v", nc.RemoteAddr(), wait)
 				time.Sleep(wait)
 			}
 		}

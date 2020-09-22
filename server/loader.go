@@ -8,7 +8,9 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 
+	"github.com/coyove/common/lru"
 	"github.com/coyove/enn"
 	"github.com/coyove/enn/server/common"
 )
@@ -19,12 +21,15 @@ func LoadIndex(path string, db *Backend) error {
 		return err
 	}
 
+	db.Index = f
 	db.Groups = map[string]*Group{}
 	db.Articles = map[[16]byte]*common.ArticleRef{}
 	db.Mods = map[string]*common.ModInfo{}
 	db.Blacklist = map[string]*net.IPNet{}
-	db.Index = f
 	db.ServerName = *ServerName
+	db.mu = new(sync.RWMutex)
+	db.muFile = new(sync.Mutex)
+	db.ipCache = lru.NewCache(1e3)
 
 	df0, err := os.OpenFile(path+".data.0", os.O_CREATE|os.O_RDWR, 0777)
 	if err != nil {
@@ -40,9 +45,9 @@ func LoadIndex(path string, db *Backend) error {
 		db.Data = append(db.Data, df)
 	}
 
-	db.Init()
-
 	rd := bufio.NewReader(f)
+	invalidGroupsFound := map[string]struct{}{}
+
 	for ln := 1; ; ln++ {
 		line, _ := rd.ReadBytes('\n')
 		if len(line) == 0 {
@@ -77,13 +82,9 @@ func LoadIndex(path string, db *Backend) error {
 				},
 				Articles: &common.HighLowSlice{
 					MaxSize: int(baseInfo.MaxLives),
-
-					// We can't append 'D' commands while loading,
-					// so NoPurgeNotify must be toggled, when all finished
-					// it will be false again
-					NoPurgeNotify: true,
 				},
-				BaseInfo: baseInfo,
+				BaseInfo:      baseInfo,
+				NoPurgeNotify: true,
 			}
 			switch baseInfo.Posting {
 			case 0:
@@ -97,12 +98,12 @@ func LoadIndex(path string, db *Backend) error {
 				continue
 			}
 			if old := db.Groups[baseInfo.Name]; old != nil {
-				common.L("#%d update group: %s => %s", ln, baseInfo.Name, baseInfo.Diff(old.BaseInfo))
+				common.D("#%d update group: %s => %s", ln, baseInfo.Name, baseInfo.Diff(old.BaseInfo))
 				old.Group = gs.Group
 				old.BaseInfo = gs.BaseInfo
 				old.Articles.MaxSize = int(baseInfo.MaxLives)
 			} else {
-				common.L("#%d create group: %s", ln, baseInfo.Name)
+				common.D("#%d create group: %s", ln, baseInfo.Name)
 				db.Groups[baseInfo.Name] = gs
 			}
 		case 'A':
@@ -120,7 +121,7 @@ func LoadIndex(path string, db *Backend) error {
 
 			g := db.Groups[string(group)]
 			if g == nil {
-				common.E("#%d %q invalid A header, invalid group: %q", ln, line, group)
+				invalidGroupsFound[string(group)] = struct{}{}
 				continue
 			}
 
@@ -156,11 +157,13 @@ func LoadIndex(path string, db *Backend) error {
 				common.E("#%d %q invalid mod info: %v", ln, line, err)
 				continue
 			}
-			common.L("#%d load mod info: %v", ln, mi)
-			db.Mods[mi.Email] = mi
-		case 'c':
-			common.L("#%d remove mod info: %q", ln, line[1:])
-			delete(db.Mods, string(line[1:]))
+			if db.Mods[mi.Email] == nil {
+				common.D("#%d load mod info: %v", ln, mi)
+				db.Mods[mi.Email] = mi
+			} else {
+				common.D("#%d remove mod info: %q", ln, mi)
+				delete(db.Mods, mi.Email)
+			}
 		case 'B':
 			parts := bytes.Split(line[1:], []byte(" "))
 			if len(parts) != 2 {
@@ -173,12 +176,18 @@ func LoadIndex(path string, db *Backend) error {
 				common.E("#%d %q invalid B header, invalid CIDR: %v", ln, line, err)
 				continue
 			}
-			common.L("#%d add to blacklist: %q => %v", ln, name, ipnet)
-			db.Blacklist[name] = ipnet
-		case 'b':
-			name := string(line[1:])
-			common.L("#%d delete from blacklist: %q", ln, name)
-			delete(db.Blacklist, name)
+			if db.Blacklist[name] == nil {
+				common.D("#%d add to blacklist: %q => %v", ln, name, ipnet)
+				db.Blacklist[name] = ipnet
+			} else {
+				common.D("#%d delete from blacklist: %q", ln, name)
+				delete(db.Blacklist, name)
+			}
+		case 'C':
+			if err := json.Unmarshal(line[1:], &db.Config); err != nil {
+				common.E("#%d %q invalid C header: %v", ln, line, err)
+				continue
+			}
 		}
 	}
 
@@ -187,11 +196,20 @@ func LoadIndex(path string, db *Backend) error {
 		g.Group.Count = int64(g.Articles.Len())
 		g.Group.High = int64(g.Articles.High())
 		g.Group.Low = int64(g.Articles.Low() + 1)
-		g.Articles.NoPurgeNotify = false
+		g.NoPurgeNotify = false
 	}
+
+	db.Config.PostIntervalSec = common.IntIf(db.Config.PostIntervalSec, 30)
+	db.Config.ThrotCmdWin = common.IntIf(db.Config.ThrotCmdWin, 20)
+	db.Config.MaxPostSize = common.IntIf(db.Config.MaxPostSize, 3e6)
 
 	common.L("loader: %d data files, %d groups, %d articles, %d mods, %d blocks",
 		len(db.Data), len(db.Groups), len(db.Articles), len(db.Mods), len(db.Blacklist))
+	common.L("loader: %#v", db.Config)
+
+	if len(invalidGroupsFound) > 0 {
+		common.E("loader: found invalid groups %v", invalidGroupsFound)
+	}
 	return nil
 }
 

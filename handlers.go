@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/textproto"
 	"strings"
+	"time"
 )
 
 func handleStat(args []string, s *session, c *textproto.Conn) error {
@@ -116,6 +117,11 @@ func handleDefault(args []string, s *session, c *textproto.Conn) error {
 func handleQuit(args []string, s *session, c *textproto.Conn) error {
 	c.PrintfLine("205 bye")
 	return io.EOF
+}
+
+func handleDate(args []string, s *session, c *textproto.Conn) error {
+	c.PrintfLine("111 %s", time.Now().Format("20060102150405"))
+	return nil
 }
 
 func handleGroup(args []string, s *session, c *textproto.Conn) error {

@@ -95,23 +95,44 @@ func generateStatus() []byte {
 
 	tb.Begin()
 	tb.Underline = true
-	tb.Write("桌面客户端：").Wgreen("Thunderbird").
-		Write("，iOS：").Wgreen("Newsy").
-		Write("，Android：").Wgreen("net.piaohong.newsgroup").
+	tb.Write("桌面客户端：").Wred("Thunderbird").
+		Write("，iOS：").Wred("Newsy").
+		Write("，Android：").Wred("net.piaohong.newsgroup").
+		Write("，网页版：").Wred("http://put.hk").Write(" (只读)").
 		Write("\n\n")
 	tb.Underline = false
 
+	tb.YellowBG = true
 	tb.Write("服务器:").Wu(*ServerName).
 		Write(" 端口:").Wu(strconv.Itoa(getListenPort(plainBind))).
 		Write(" SSL/TLS端口:").Wu(strconv.Itoa(getListenPort(tlsBind))).
-		Write(" 编码:").Wu("UTF-8").
-		Write("\n\n").
-		Write(fmt.Sprintf("运行:%v 更新:%v 证书:%v\nMod:",
-			time.Since(startAt)/1e9*1e9,
-			time.Now().Format(timeFormat),
-			x509cert.NotAfter.Format(timeFormat),
-		))
+		Write(" 编码:").Wu("UTF-8")
+	tb.YellowBG = false
 
+	tb.Write("\n\n").Write(fmt.Sprintf("运行:%v 更新:%v 证书:%v 数据:%v+%v\n",
+		time.Since(startAt)/1e9*1e9,
+		time.Now().Format(timeFormat),
+		x509cert.NotAfter.Format(timeFormat),
+		common.FormatSize(func() int64 {
+			if fi, _ := db.Index.Stat(); fi != nil {
+				return fi.Size()
+			}
+			return 0
+		}()),
+		common.FormatSize(func() int64 {
+			if fi, _ := db.Data[len(db.Data)-1].Stat(); fi != nil {
+				return fi.Size()
+			}
+			return 0
+		}()),
+	))
+	tb.Write(fmt.Sprintf("发文间隔:%vs 发文大小:%v   * NNTP:1/%d\n\n",
+		db.Config.PostIntervalSec,
+		common.FormatSize(db.Config.MaxPostSize),
+		db.Config.ThrotCmdWin,
+	))
+
+	tb.Write("Mod:")
 	for k := range db.Mods {
 		tb.Write(" ")
 		tb.Write(k)
@@ -159,6 +180,7 @@ func generateStatus() []byte {
 			tb.Write("\n")
 		}
 
+		tb.Write("\n")
 	}
 
 	w := &bytes.Buffer{}

@@ -29,6 +29,7 @@ type Textbox struct {
 	Width                  int
 	Indent                 int
 	Gray, Red, Blue, Green bool
+	YellowBG               bool
 	Underline              bool
 	Strikeline             bool
 	Bold                   bool
@@ -46,12 +47,13 @@ func (tb *Textbox) Begin() {
 	tb.dx2 = 12 + tb.CharSpace
 	tb.dy = 12 + tb.LineSpace
 	tb.canvas = image.NewPaletted(image.Rect(0, 0, tb.Width, tb.Margin*2), color.Palette{
-		color.White,
-		color.Black,
-		color.Gray16{0x8000},
-		color.RGBA{255, 0, 0, 255},
-		color.RGBA{0, 0x96, 0x88, 255},
-		color.RGBA{0, 0, 255, 255},
+		/* 0 */ color.White,
+		/* 1 */ color.Black,
+		/* 2 */ color.Gray16{0x8000},
+		/* 3 */ color.RGBA{255, 0, 0, 255},
+		/* 4 */ color.RGBA{0, 0x96, 0x88, 255},
+		/* 5 */ color.RGBA{0, 0, 255, 255},
+		/* 6 */ color.RGBA{255, 0xeb, 0x3b, 255},
 	})
 	tb.rightmost = tb.canvas.Bounds().Dx() - tb.Margin - tb.dx
 
@@ -86,6 +88,12 @@ func (tb *Textbox) Ws(text string) *Textbox {
 	tb.Strikeline = true
 	tb.Write(text)
 	tb.Strikeline = false
+	return tb
+}
+func (tb *Textbox) Wy(text string) *Textbox {
+	tb.YellowBG = true
+	tb.Write(text)
+	tb.YellowBG = false
 	return tb
 }
 func (tb *Textbox) Wgray(text string) *Textbox {
@@ -154,6 +162,11 @@ func (tb *Textbox) Write(text string) *Textbox {
 		for xx := x * 12; xx < x*12+12; xx++ {
 			for yy := y * 12; yy < y*12+12; yy++ {
 				dx, dy := xx-x*12, yy-y*12
+				if tb.YellowBG {
+					safeset(6, tb.x+dx, tb.y+dy)
+					safeset(6, tb.x+dx+1, tb.y+dy)
+				}
+
 				if r, g, b, _ := BasePlane.At(xx, yy).RGBA(); r+g+b == 0 {
 					safeset(pidx, tb.x+dx, tb.y+dy)
 					if tb.Bold {

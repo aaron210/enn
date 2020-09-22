@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/coyove/enn"
@@ -16,15 +17,19 @@ import (
 )
 
 var (
-	Certbot      = flag.String("certbot", "", "")
-	DBPath       = flag.String("db", "testdb", "")
-	NopDB        = flag.String("nop", "", "")
-	ServerName   = flag.String("name", "10.94.86.99", "Server name")
-	Listen       = flag.String("l", ":1119 :1563 :8080", "listen addresses")
-	MaxPostSize  = flag.Int64("max-post-size", 1024*1024*3, "Global max post size (bytes)")
+	// Global flags
+	Certbot    = flag.String("certbot", "/etc/letsencrypt/live/", "Let's Encrypt")
+	DBPath     = flag.String("db", "testdb", "Database path")
+	NopDB      = flag.String("nop", "", "NOP lines")
+	ServerName = flag.String("name", "10.94.86.99", "Server name")
+	Listen     = flag.String("l", ":1119 :1563 :8080", "Listen addresses")
+	Verbosity  = flag.Int("v", 1, "Log verbosity")
+
+	// Interactive flags
 	GroupCmd     = flag.String("group", "", "")
 	ModCmd       = flag.String("mod", "", "")
-	BlacklistCmd = flag.String("blacklist", "", "")
+	BlacklistCmd = flag.Bool("blacklist", false, "")
+	ConfigCmd    = flag.Bool("config", false, "")
 )
 
 var (
@@ -32,12 +37,13 @@ var (
 	startAt                      = time.Now()
 	x509cert                     x509.Certificate
 	plainBind, tlsBind, httpBind string
+	ipDedup                      sync.Map
 )
 
 func main() {
 	rand.Seed(time.Now().Unix())
 	flag.Parse()
-
+	common.Verbose = *Verbosity
 	common.PanicIf(LoadIndex(*DBPath, db), "load data source %v: %%err", *DBPath)
 
 	if HandleCommand() {
@@ -45,6 +51,8 @@ func main() {
 	}
 
 	s := enn.NewServer(db)
+	s.ThrotCmdWindow = time.Second * time.Duration(db.Config.ThrotCmdWin)
+
 	handle := func(l net.Listener) {
 		for {
 			c, err := l.Accept()
@@ -61,10 +69,22 @@ func main() {
 			}
 			if db.IsBanned(tcpaddr.IP) {
 				c.Close()
-				common.E("handle banned IP: %v", c.RemoteAddr())
+				common.E("handle banned IP: %v", tcpaddr)
 				continue
 			}
-			go s.Process(c)
+
+			// Ensure only one TCP connection per IP
+			conn, ok := ipDedup.Load(tcpaddr.IP.String())
+			if ok {
+				common.L("handle multiple conns: %v, close old one", tcpaddr)
+				conn.(net.Conn).Close()
+			}
+			ipDedup.Store(tcpaddr.IP.String(), c)
+
+			go func() {
+				s.Process(c)
+				ipDedup.Delete(tcpaddr.IP.String())
+			}()
 		}
 	}
 

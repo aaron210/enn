@@ -59,7 +59,7 @@ func (a *Article) Marshal() []byte {
 type BaseGroupInfo struct {
 	Name        string `json:",omitempty"`
 	Desc        string `json:",omitempty"`
-	Posting     int    `json:",omitempty"`
+	Posting     int64  `json:",omitempty"`
 	MaxPostSize int64  `json:",omitempty"`
 	MaxLives    int64  `json:",omitempty"`
 	CreateTime  int64  `json:",omitempty"`
@@ -91,6 +91,7 @@ func (g BaseGroupInfo) Diff(g2 *BaseGroupInfo) string {
 type ModInfo struct {
 	Email    string
 	Password string
+	Deleted  bool
 }
 
 func (m *ModInfo) String() string {
@@ -102,3 +103,8 @@ type AuthObject struct {
 	User, Pass string
 }
 
+type Config struct {
+	MaxPostSize     int64
+	ThrotCmdWin     int64
+	PostIntervalSec int64
+}

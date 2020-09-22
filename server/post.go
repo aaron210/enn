@@ -32,7 +32,7 @@ func (db *Backend) Post(article *enn.Article) error {
 		if refer == "" {
 			return &enn.NNTPError{Code: 441, Msg: "Please refer an article"}
 		}
-		common.L("delete article %q, auth: %#v", refer, db.AuthObject)
+		common.D("delete article %q, auth: %#v", refer, db.AuthObject)
 		return db.DeleteArticle(common.ExtractMsgID(refer))
 	}
 
@@ -77,29 +77,30 @@ func (db *Backend) Post(article *enn.Article) error {
 		ip := tcpaddr.IP.String()
 		v, ok := db.ipCache.Get(ip)
 		if ok {
-			if diff := time.Since(v.(time.Time)); diff < db.PostInterval {
-				return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post cooldown (wait %v)", db.PostInterval-diff)}
+			cd := time.Duration(db.Config.PostIntervalSec) * time.Second
+			if diff := time.Since(v.(time.Time)); diff < cd {
+				return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post cooldown (wait %v)", cd-diff)}
 			}
 		}
 		db.ipCache.Add(ip, time.Now())
 	}
 
 	// Read the body, check global max posting size limitation
-	mps := *MaxPostSize
+	mps := db.Config.MaxPostSize * 4 / 3
 	buf := &bytes.Buffer{}
 	n, err := io.Copy(buf, io.LimitReader(article.Body, mps))
 	if err != nil {
 		return err
 	}
 	if n >= mps {
-		return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post too large (max %s)", common.FormatSize(mps))}
+		return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post too large (max %s)", common.FormatSize(db.Config.MaxPostSize))}
 	}
 
 	// If client sent a custom Message-Id, we will try to use it
 	var msgID string
 	if msgid := article.Header["Message-Id"]; len(msgid) > 0 {
 		msgID = common.ExtractMsgID(msgid[0])
-		common.L("post: predefined msgid %s", msgID)
+		common.D("post: predefined msgid %s", msgID)
 		delete(article.Header, "Message-Id")
 	} else {
 		msgID = strconv.FormatInt(time.Now().Unix(), 36) + strconv.FormatUint(uint64(rand.Uint32()), 36)
@@ -159,7 +160,7 @@ func (db *Backend) Post(article *enn.Article) error {
 		}
 
 		if limit := g.BaseInfo.MaxPostSize * 4 / 3; g.BaseInfo.MaxPostSize != 0 && n > limit {
-			common.L("post: %q large article %v (%d <-> %d)", g.Group.Name, msgID, n, limit)
+			common.D("post: %q large article %v (%d <-> %d)", g.Group.Name, msgID, n, limit)
 			return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post too large (max %s)", common.FormatSize(limit))}
 			continue
 		}
@@ -170,7 +171,7 @@ func (db *Backend) Post(article *enn.Article) error {
 			ar.Index,
 			strconv.FormatInt(ar.Offset, 36),
 			strconv.FormatInt(ar.Length, 36)))); err != nil {
-			common.L("post: %q write index %err", g.Group.Name, err)
+			common.D("post: %q write index %err", g.Group.Name, err)
 			continue
 		}
 
@@ -179,7 +180,7 @@ func (db *Backend) Post(article *enn.Article) error {
 		g.Group.High = int64(g.Articles.High()+1) - 1
 		g.Group.Count = int64(g.Articles.Len())
 
-		common.L("post: %q new article %v", g.Group.Name, msgID)
+		common.D("post: %q new article %v", g.Group.Name, msgID)
 		postSuccess++
 	}
 
