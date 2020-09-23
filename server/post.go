@@ -161,7 +161,6 @@ func (db *Backend) Post(article *enn.Article) error {
 
 		if limit := g.BaseInfo.MaxPostSize * 4 / 3; g.BaseInfo.MaxPostSize != 0 && n > limit {
 			common.D("post: %q large article %v (%d <-> %d)", g.Group.Name, msgID, n, limit)
-			return &enn.NNTPError{Code: 441, Msg: fmt.Sprintf("Post too large (max %s)", common.FormatSize(limit))}
 			continue
 		}
 

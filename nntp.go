@@ -25,14 +25,6 @@ const (
 )
 
 func (ps PostingStatus) String() string {
-	switch ps {
-	case PostingModerated:
-		return "Mod"
-	case PostingNotPermitted:
-		return "Closed"
-	case PostingPermitted, Unknown:
-		return "Open"
-	}
 	return fmt.Sprintf("%c", ps)
 }
 
@@ -238,7 +230,8 @@ func (s *Server) Process(nc net.Conn) {
 			return
 		}
 		cmd := strings.Split(l, " ")
-		// common.L("%v", cmd)
+		common.L("%v", cmd)
+
 		args := []string{}
 		if len(cmd) > 1 {
 			args = cmd[1:]
